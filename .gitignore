@@ -1,0 +1,44 @@
+# Unreal Engine
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+*.VC.db
+*.opensdf
+*.opendb
+*.sdf
+*.sln
+*.suo
+*.xcodeproj
+*.xcworkspace
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.userosscache
+*.autosave
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local / temp
+.tmp-*/
+*.log
+*.pdb
+
+# Secrets
+.env
+.env.*
+*.pem
+*.pfx
+*credentials*
+*secret*
+
+# Plugin build artifacts (keep Source/)
+Plugins/**/Binaries/
+Plugins/**/Intermediate/
+Plugins/**/DerivedDataCache/
+Plugins/**/Saved/

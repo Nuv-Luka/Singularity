@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0-p71",
+	"FriendlyName": "Singularity Planet Terrain",
+	"Description": "Phase 7 GPU height-tile bake for landable moon terrain (compute + readback).",
+	"Category": "Rendering",
+	"CreatedBy": "SINGULARITY",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SingularityPlanetTerrain",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
+	]
+}

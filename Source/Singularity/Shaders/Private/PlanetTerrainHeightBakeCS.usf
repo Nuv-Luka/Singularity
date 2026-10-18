@@ -1,0 +1,44 @@
+#include "/Singularity/Private/PlanetTerrainHeight.ush"
+
+RWTexture2D<float2> OutHeights; // R=fine, G=coarse metres
+
+uint FaceIndex;
+float4 UvRect; // u0,v0,u1,v1
+uint Resolution; // grid is Resolution+1
+float FineSpacingM;
+float CoarseSpacingM;
+float AmplitudeM;
+float RadiusM;
+float ContinentFreq;
+float MountainFreq;
+float DetailFreq;
+float CraterFreq0;
+float CraterDensity;
+float CraterWeight;
+float MountainWeight;
+uint NoiseSeed;
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint N = Resolution + 1;
+	if (DispatchThreadId.x >= N || DispatchThreadId.y >= N)
+	{
+		return;
+	}
+
+	float U = lerp(UvRect.x, UvRect.z, (float)DispatchThreadId.x / (float)Resolution);
+	float V = lerp(UvRect.y, UvRect.w, (float)DispatchThreadId.y / (float)Resolution);
+	float3 Dir = PlanetTerrainFacePoint(FaceIndex, U, V);
+
+	float Hf = EvaluateHeightGpuFloat(
+		Dir, FineSpacingM, AmplitudeM, RadiusM,
+		ContinentFreq, MountainFreq, DetailFreq, CraterFreq0,
+		CraterDensity, CraterWeight, MountainWeight, NoiseSeed);
+	float Hc = EvaluateHeightGpuFloat(
+		Dir, CoarseSpacingM, AmplitudeM, RadiusM,
+		ContinentFreq, MountainFreq, DetailFreq, CraterFreq0,
+		CraterDensity, CraterWeight, MountainWeight, NoiseSeed);
+
+	OutHeights[DispatchThreadId.xy] = float2(Hf, Hc);
+}

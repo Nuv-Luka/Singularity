@@ -1,0 +1,25 @@
+// Ray / sphere helpers (planet-relative kilometers). Upstream: intersection.wgsl
+
+#ifndef SINGULARITY_ATMOSPHERE_GEOMETRY_USH
+#define SINGULARITY_ATMOSPHERE_GEOMETRY_USH
+
+// Returns (tNear, tFar). Miss => tNear > tFar (we use tNear = -1).
+float2 RaySphereIntersect(float3 Ro, float3 Rd, float Radius)
+{
+	float B = dot(Ro, Rd);
+	float C = dot(Ro, Ro) - Radius * Radius;
+	float H = B * B - C;
+	if (H < 0.0)
+	{
+		return float2(-1.0, -2.0);
+	}
+	float S = sqrt(max(H, 0.0));
+	return float2(-B - S, -B + S);
+}
+
+bool RaySphereHit(float2 T)
+{
+	return T.y >= max(T.x, 0.0);
+}
+
+#endif

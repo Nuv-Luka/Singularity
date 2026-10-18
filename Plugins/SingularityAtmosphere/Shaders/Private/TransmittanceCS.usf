@@ -1,0 +1,106 @@
+// M4 — Transmittance LUT 256×64 (upstream render_transmittance_lut.wgsl). MIT.
+
+#include "/Engine/Public/Platform.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereGeometry.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereUv.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereMedium.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 16
+#endif
+
+#ifndef T_SAMPLES
+#define T_SAMPLES 40
+#endif
+
+RWTexture2D<float4> OutputTexture;
+
+float BottomRadiusKm;
+float TopRadiusKm;
+float DensityScale;
+float4 RayleighScatterExp;
+float4 MieScatterExp;
+float4 MieExtinctionG;
+float3 Absorption;
+
+float ClosestPositiveRoot(float B, float C)
+{
+	float H = B * B - C;
+	if (H < 0.0)
+	{
+		return -1.0;
+	}
+	float S = sqrt(H);
+	float T0 = -B - S;
+	float T1 = -B + S;
+	if (T0 >= 0.0)
+	{
+		return T0;
+	}
+	return T1 >= 0.0 ? T1 : -1.0;
+}
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint2 Dim;
+	OutputTexture.GetDimensions(Dim.x, Dim.y);
+	if (DispatchThreadId.x >= Dim.x || DispatchThreadId.y >= Dim.y)
+	{
+		return;
+	}
+
+	const float2 Uv = (float2(DispatchThreadId.xy) + 0.5) / float2(Dim);
+	const float Bottom = max(BottomRadiusKm, 1.0);
+	const float Top = max(TopRadiusKm, Bottom * 1.001);
+	const float2 Lut = UvToTransmittanceLutParams(Uv, Bottom, Top);
+	const float ViewHeight = Lut.x;
+	const float CosZenith = Lut.y;
+
+	const float2 WorldPos = float2(0.0, ViewHeight);
+	const float2 WorldDir = float2(sqrt(max(1.0 - CosZenith * CosZenith, 0.0)), CosZenith);
+
+	const float B = dot(WorldDir, WorldPos);
+	const float TBottom = ClosestPositiveRoot(B, dot(WorldPos, WorldPos) - Bottom * Bottom);
+	const float TTop = ClosestPositiveRoot(B, dot(WorldPos, WorldPos) - Top * Top);
+
+	float TMax = 0.0;
+	if (TBottom < 0.0)
+	{
+		if (TTop < 0.0)
+		{
+			OutputTexture[DispatchThreadId.xy] = float4(1, 1, 1, 1);
+			return;
+		}
+		TMax = TTop;
+	}
+	else
+	{
+		TMax = (TTop > 0.0) ? min(TTop, TBottom) : 0.0;
+		if (TMax <= 0.0)
+		{
+			OutputTexture[DispatchThreadId.xy] = float4(1, 1, 1, 1);
+			return;
+		}
+	}
+
+	TMax = min(TMax, 90000.0);
+	const float Dens = max(DensityScale, 0.001);
+	const float3 Rayleigh = RayleighScatterExp.xyz;
+	const float RayExp = RayleighScatterExp.w;
+	const float3 MieS = MieScatterExp.xyz;
+	const float MieExp = MieScatterExp.w;
+	const float3 MieExt = MieExtinctionG.xyz;
+	const float3 Absorp = Absorption;
+
+	float3 OpticalDepth = 0.0;
+	const float Dt = TMax / float(T_SAMPLES);
+	for (int S = 0; S < T_SAMPLES; ++S)
+	{
+		float T = (float(S) + 0.3) * Dt;
+		float SampleHeight = length(WorldPos + WorldDir * T) - Bottom;
+		OpticalDepth += SampleExtinction(SampleHeight, Dens, Rayleigh, RayExp, MieS, MieExp, MieExt, Absorp) * Dt;
+	}
+
+	OutputTexture[DispatchThreadId.xy] = float4(exp(-OpticalDepth), 1.0);
+}

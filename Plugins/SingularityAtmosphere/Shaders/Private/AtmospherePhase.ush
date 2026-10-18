@@ -1,0 +1,20 @@
+#ifndef SINGULARITY_ATMOSPHERE_PHASE_USH
+#define SINGULARITY_ATMOSPHERE_PHASE_USH
+
+#ifndef HILL_PI
+#define HILL_PI 3.14159265359
+#endif
+
+float RayleighPhase(float CosTheta)
+{
+	return (3.0 / (16.0 * HILL_PI)) * (1.0 + CosTheta * CosTheta);
+}
+
+float HgPhase(float CosTheta, float G)
+{
+	float G2 = G * G;
+	float Denom = pow(max(1.0 + G2 - 2.0 * G * CosTheta, 1e-6), 1.5);
+	return (1.0 / (4.0 * HILL_PI)) * (1.0 - G2) / Denom;
+}
+
+#endif

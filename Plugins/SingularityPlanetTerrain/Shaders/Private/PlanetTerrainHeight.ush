@@ -1,0 +1,257 @@
+// Float32 height field — must stay in sync with FPlanetTerrainHeight::EvaluateHeightGpuFloat.
+// See DOCS/PlanetTerrain/Phase7_GpuBake.md
+
+#ifndef PLANET_TERRAIN_HEIGHT_USH
+#define PLANET_TERRAIN_HEIGHT_USH
+
+uint GpuHashU32(uint X)
+{
+	X ^= X >> 16;
+	X *= 0x7feb352du;
+	X ^= X >> 15;
+	X *= 0x846ca68bu;
+	X ^= X >> 16;
+	return X;
+}
+
+float GpuLattice(uint Seed, int Xi, int Yi, int Zi)
+{
+	uint H = Seed;
+	H = GpuHashU32(H ^ (uint)Xi * 0x85ebca6bu);
+	H = GpuHashU32(H ^ (uint)Yi * 0xc2b2ae35u);
+	H = GpuHashU32(H ^ (uint)Zi * 0x27d4eb2du);
+	return (float)(H & 0x00FFFFFFu) * (1.0f / 16777215.0f) * 2.0f - 1.0f;
+}
+
+float GpuSmooth(float T)
+{
+	return T * T * (3.0f - 2.0f * T);
+}
+
+float GpuValueNoise(uint Seed, float X, float Y, float Z)
+{
+	int Xi = (int)floor(X);
+	int Yi = (int)floor(Y);
+	int Zi = (int)floor(Z);
+	float Xf = X - (float)Xi;
+	float Yf = Y - (float)Yi;
+	float Zf = Z - (float)Zi;
+	float U = GpuSmooth(Xf);
+	float V = GpuSmooth(Yf);
+	float W = GpuSmooth(Zf);
+	float C000 = GpuLattice(Seed, Xi, Yi, Zi);
+	float C100 = GpuLattice(Seed, Xi + 1, Yi, Zi);
+	float C010 = GpuLattice(Seed, Xi, Yi + 1, Zi);
+	float C110 = GpuLattice(Seed, Xi + 1, Yi + 1, Zi);
+	float C001 = GpuLattice(Seed, Xi, Yi, Zi + 1);
+	float C101 = GpuLattice(Seed, Xi + 1, Yi, Zi + 1);
+	float C011 = GpuLattice(Seed, Xi, Yi + 1, Zi + 1);
+	float C111 = GpuLattice(Seed, Xi + 1, Yi + 1, Zi + 1);
+	float X00 = lerp(C000, C100, U);
+	float X10 = lerp(C010, C110, U);
+	float X01 = lerp(C001, C101, U);
+	float X11 = lerp(C011, C111, U);
+	return lerp(lerp(X00, X10, V), lerp(X01, X11, V), W);
+}
+
+float GpuFbm(uint Seed, float3 P, float Octaves, float Frequency, float Lacunarity, float Gain)
+{
+	if (Octaves <= 0.0f)
+	{
+		return 0.0f;
+	}
+	int Full = (int)floor(Octaves);
+	float Fr = Octaves - (float)Full;
+	float Sum = 0.0f, Amp = 1.0f, F = Frequency, Norm = 0.0f;
+	[loop]
+	for (int I = 0; I < Full; ++I)
+	{
+		Sum += Amp * GpuValueNoise(Seed, P.x * F, P.y * F, P.z * F);
+		Norm += Amp;
+		Amp *= Gain;
+		F *= Lacunarity;
+	}
+	if (Fr > 0.0f)
+	{
+		Sum += Amp * Fr * GpuValueNoise(Seed, P.x * F, P.y * F, P.z * F);
+		Norm += Amp * Fr;
+	}
+	return Norm > 0.0f ? Sum / Norm : 0.0f;
+}
+
+float GpuRidged(uint Seed, float3 P, float Octaves, float Frequency, float Lacunarity, float Gain)
+{
+	if (Octaves <= 0.0f)
+	{
+		return 0.0f;
+	}
+	int Full = (int)floor(Octaves);
+	float Fr = Octaves - (float)Full;
+	float Sum = 0.0f, Amp = 0.5f, F = Frequency, Prev = 1.0f, Norm = 0.0f;
+	[loop]
+	for (int I = 0; I < Full; ++I)
+	{
+		float N = 1.0f - abs(GpuValueNoise(Seed, P.x * F, P.y * F, P.z * F));
+		N *= N;
+		N *= Prev;
+		Sum += N * Amp;
+		Norm += Amp;
+		Prev = N;
+		Amp *= Gain;
+		F *= Lacunarity;
+	}
+	if (Fr > 0.0f)
+	{
+		float N = 1.0f - abs(GpuValueNoise(Seed, P.x * F, P.y * F, P.z * F));
+		N *= N;
+		N *= Prev;
+		Sum += N * Amp * Fr;
+		Norm += Amp * Fr;
+	}
+	return Norm > 0.0f ? saturate(Sum / Norm) : 0.0f;
+}
+
+float GpuOctavesFor(float BaseFreq, float SampleSpacing, float RadiusM, int MaxOctaves)
+{
+	if (SampleSpacing <= 0.0f)
+	{
+		return (float)MaxOctaves;
+	}
+	float MaxFreq = 3.14159265f * RadiusM / SampleSpacing;
+	if (MaxFreq <= BaseFreq)
+	{
+		return 1.0f;
+	}
+	return clamp(log2(MaxFreq / BaseFreq) + 1.0f, 1.0f, (float)MaxOctaves);
+}
+
+float GpuLayerGate(float Freq, float SampleSpacing, float RadiusM)
+{
+	if (SampleSpacing <= 0.0f)
+	{
+		return 1.0f;
+	}
+	float Wavelength = 2.0f * 3.14159265f * RadiusM / Freq;
+	float Samples = Wavelength / SampleSpacing;
+	return smoothstep(4.0f, 64.0f, Samples);
+}
+
+float GpuCraterLayer(uint Seed, float3 Dir, float Freq, uint Salt, float SampleSpacing, float Density, float RadiusM)
+{
+	float Gate = GpuLayerGate(Freq, SampleSpacing, RadiusM);
+	if (Gate <= 0.0f)
+	{
+		return 0.0f;
+	}
+	float3 P = Dir * Freq;
+	int Xi = (int)floor(P.x);
+	int Yi = (int)floor(P.y);
+	int Zi = (int)floor(P.z);
+	float MinBowl = 0.0f, MaxRim = 0.0f;
+	[loop]
+	for (int Dz = -1; Dz <= 1; ++Dz)
+	{
+		[loop]
+		for (int Dy = -1; Dy <= 1; ++Dy)
+		{
+			[loop]
+			for (int Dx = -1; Dx <= 1; ++Dx)
+			{
+				uint H = GpuHashU32(Seed ^ Salt);
+				H = GpuHashU32(H ^ (uint)(Xi + Dx) * 0x85ebca6bu);
+				H = GpuHashU32(H ^ (uint)(Yi + Dy) * 0xc2b2ae35u);
+				H = GpuHashU32(H ^ (uint)(Zi + Dz) * 0x27d4eb2du);
+				float Fx = (float)(Xi + Dx) + (float)(H & 0xFFFFu) * (1.0f / 65535.0f);
+				H = GpuHashU32(H ^ 0x9e3779b9u);
+				float Fy = (float)(Yi + Dy) + (float)(H & 0xFFFFu) * (1.0f / 65535.0f);
+				H = GpuHashU32(H ^ 0x85ebca6bu);
+				float Fz = (float)(Zi + Dz) + (float)(H & 0xFFFFu) * (1.0f / 65535.0f);
+				H = GpuHashU32(H ^ 0xc2b2ae35u);
+				float Rand = (float)(H & 0xFFFFu) * (1.0f / 65535.0f);
+				if (Rand > Density)
+				{
+					continue;
+				}
+				float CraterR = 0.22f + 0.28f * frac(Rand * 7.3f + 0.19f);
+				float Ex = P.x - Fx, Ey = P.y - Fy, Ez = P.z - Fz;
+				float T = length(float3(Ex, Ey, Ez)) / CraterR;
+				if (T >= 1.5f)
+				{
+					continue;
+				}
+				float Bowl = -(1.0f - GpuSmooth(min(T, 1.0f) / 0.85f));
+				float E = (T - 0.95f) / 0.12f;
+				float Rim = 0.28f * exp(-0.5f * E * E);
+				MinBowl = min(MinBowl, Bowl);
+				MaxRim = max(MaxRim, Rim);
+			}
+		}
+	}
+	return (MinBowl + MaxRim) * Gate;
+}
+
+float3 PlanetTerrainFacePoint(uint Face, float U, float V)
+{
+	float A = U * 2.0f - 1.0f;
+	float B = V * 2.0f - 1.0f;
+	float3 P;
+	if (Face == 0) P = float3(1.0f, B, -A);
+	else if (Face == 1) P = float3(-1.0f, B, A);
+	else if (Face == 2) P = float3(A, 1.0f, -B);
+	else if (Face == 3) P = float3(A, -1.0f, B);
+	else if (Face == 4) P = float3(A, B, 1.0f);
+	else P = float3(-A, B, -1.0f);
+	return normalize(P);
+}
+
+float EvaluateHeightGpuFloat(
+	float3 Dir,
+	float SampleSpacing,
+	float AmplitudeM,
+	float RadiusM,
+	float ContinentFreq,
+	float MountainFreq,
+	float DetailFreq,
+	float CraterFreq0,
+	float CraterDensity,
+	float CraterWeight,
+	float MountainWeight,
+	uint NoiseSeed)
+{
+	Dir = normalize(Dir);
+	float ContOct = GpuOctavesFor(ContinentFreq, SampleSpacing, RadiusM, 8);
+	float MtnOct = GpuOctavesFor(MountainFreq, SampleSpacing, RadiusM, 10);
+	float DetOct = GpuOctavesFor(DetailFreq, SampleSpacing, RadiusM, 12);
+
+	float Continents = GpuFbm(NoiseSeed, Dir, ContOct, ContinentFreq, 2.0f, 0.5f);
+	float Mask = smoothstep(-0.2f, 0.4f, Continents);
+	float3 Warp = float3(
+		GpuFbm(NoiseSeed, Dir + float3(1.1f, 0.0f, 0.0f), 3.0f, ContinentFreq * 0.9f, 2.0f, 0.5f),
+		GpuFbm(NoiseSeed, Dir + float3(0.0f, 1.3f, 0.0f), 3.0f, ContinentFreq * 0.9f, 2.0f, 0.5f),
+		GpuFbm(NoiseSeed, Dir + float3(0.0f, 0.0f, 1.7f), 3.0f, ContinentFreq * 0.9f, 2.0f, 0.5f));
+	float3 Warped = normalize(Dir + Warp * 0.12f);
+	float Mountains = GpuRidged(NoiseSeed, Warped, MtnOct, MountainFreq, 2.0f, 0.55f);
+	float Detail = GpuFbm(NoiseSeed, Dir, DetOct, DetailFreq, 2.0f, 0.55f);
+
+	float Crater = 0.0f;
+	if (CraterWeight > 0.0f)
+	{
+		float Freq = CraterFreq0 * 0.5f;
+		float Weight = 1.0f, Sum = 0.0f, WSum = 0.0f;
+		[loop]
+		for (int O = 0; O < 6; ++O)
+		{
+			uint Salt = 0x1111u + (uint)O * 0x9E3779B9u;
+			Sum += Weight * GpuCraterLayer(NoiseSeed, Dir, Freq, Salt, SampleSpacing, CraterDensity, RadiusM);
+			WSum += Weight;
+			Freq *= 1.9f;
+			Weight *= 0.62f;
+		}
+		Crater = WSum > 0.0f ? Sum / WSum : 0.0f;
+	}
+
+	float Shape = 0.28f * Continents + MountainWeight * Mountains * Mask + 0.40f * Detail * 0.5f + CraterWeight * Crater;
+	return AmplitudeM * Shape;
+}
+
+#endif

@@ -1,0 +1,158 @@
+// M5 — Sky-view LUT 192×108 (sun-centric lon; upstream render_sky_view_lut.wgsl). MIT.
+
+#include "/Engine/Public/Platform.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereGeometry.ush"
+#include "/SingularityAtmosphere/Private/AtmospherePhase.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereMedium.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereUv.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 16
+#endif
+
+#ifndef SKY_SAMPLES
+#define SKY_SAMPLES 24
+#endif
+
+Texture2D TransmittanceLut;
+SamplerState TransmittanceSampler;
+Texture2D MultiScatteringLut;
+SamplerState MultiScatteringSampler;
+RWTexture2D<float4> OutputTexture;
+
+float BottomRadiusKm;
+float TopRadiusKm;
+float DensityScale;
+float ViewHeightKm;
+float3 SunDirLocal; // sun in LUT frame (z = zenith)
+float SunIlluminance;
+float4 RayleighScatterExp;
+float4 MieScatterExp;
+float4 MieExtinctionG;
+float3 Absorption;
+
+float3 SampleT(float ViewHeight, float CosZenith, float Bottom, float Top)
+{
+	return TransmittanceLut.SampleLevel(TransmittanceSampler, TransmittanceLutParamsToUv(Bottom, Top, ViewHeight, CosZenith), 0).rgb;
+}
+
+float3 SampleMS(float ViewHeight, float CosSunZenith, float Bottom, float Top)
+{
+	float U = saturate(CosSunZenith * 0.5 + 0.5);
+	float V = saturate((ViewHeight - Bottom) / max(Top - Bottom, 1e-3));
+	float2 Uv = float2(FromUnitToSubUvs(U, 32.0), FromUnitToSubUvs(V, 32.0));
+	return MultiScatteringLut.SampleLevel(MultiScatteringSampler, Uv, 0).rgb;
+}
+
+float3 ComputeWorldDir(float2 UvUnit, float ViewHeight, float Bottom, float Top)
+{
+	float VHorizon = sqrt(max(ViewHeight * ViewHeight - Bottom * Bottom, 0.0));
+	float GroundToHorizon = acos(clamp(VHorizon / max(ViewHeight, 1e-3), -1.0, 1.0));
+	float ZenithHorizon = 3.14159265 - GroundToHorizon;
+	float CosViewZenith;
+	if (UvUnit.y < 0.5)
+	{
+		float Coord = 1.0 - (2.0 * UvUnit.y);
+		CosViewZenith = cos(ZenithHorizon * (1.0 - (Coord * Coord)));
+	}
+	else
+	{
+		float Coord = (UvUnit.y * 2.0) - 1.0;
+		CosViewZenith = cos(ZenithHorizon + GroundToHorizon * (Coord * Coord));
+	}
+	float SinViewZenith = sqrt(max(1.0 - CosViewZenith * CosViewZenith, 0.0));
+	float CosLightView = -((UvUnit.x * UvUnit.x) * 2.0 - 1.0);
+	return float3(
+		SinViewZenith * CosLightView,
+		SinViewZenith * sqrt(max(1.0 - CosLightView * CosLightView, 0.0)),
+		CosViewZenith);
+}
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint2 Dim;
+	OutputTexture.GetDimensions(Dim.x, Dim.y);
+	if (DispatchThreadId.x >= Dim.x || DispatchThreadId.y >= Dim.y)
+	{
+		return;
+	}
+
+	const float2 Res = float2(192.0, 108.0);
+	const float2 Pix = float2(DispatchThreadId.xy) + 0.5;
+	const float2 UvIn = Pix / Res;
+	const float2 Uv = float2(FromSubUvsToUnit(UvIn.x, Res.x), FromSubUvsToUnit(UvIn.y, Res.y));
+
+	const float Bottom = max(BottomRadiusKm, 1.0);
+	const float Top = max(TopRadiusKm, Bottom * 1.001);
+	float ViewHeight = clamp(ViewHeightKm, Bottom + 0.001, Top - 0.001);
+
+	float3 WorldPos = float3(0.0, 0.0, ViewHeight);
+	float3 WorldDir = ComputeWorldDir(Uv, ViewHeight, Bottom, Top);
+	float3 SunDir = normalize(SunDirLocal);
+
+	// Move to atmosphere entry if outside.
+	float2 HitTop = RaySphereIntersect(WorldPos, WorldDir, Top);
+	if (length(WorldPos) > Top)
+	{
+		if (!RaySphereHit(HitTop))
+		{
+			OutputTexture[DispatchThreadId.xy] = float4(0, 0, 0, 1);
+			return;
+		}
+		WorldPos = WorldPos + WorldDir * max(HitTop.x, 0.0);
+	}
+
+	const float Dens = max(DensityScale, 0.001);
+	const float3 Rayleigh = RayleighScatterExp.xyz;
+	const float RayExp = RayleighScatterExp.w;
+	const float3 MieS = MieScatterExp.xyz;
+	const float MieExp = MieScatterExp.w;
+	const float3 MieExt = MieExtinctionG.xyz;
+	const float G = clamp(MieExtinctionG.w, 0.0, 0.95);
+	const float3 Absorp = Absorption;
+
+	float2 HitAtmo = RaySphereIntersect(WorldPos, WorldDir, Top);
+	float T1 = HitAtmo.y;
+	float2 HitPlanet = RaySphereIntersect(WorldPos, WorldDir, Bottom);
+	if (HitPlanet.x > 0.0)
+	{
+		T1 = min(T1, HitPlanet.x);
+	}
+	if (T1 <= 1e-4)
+	{
+		OutputTexture[DispatchThreadId.xy] = float4(0, 0, 0, 1);
+		return;
+	}
+
+	float CosTheta = dot(SunDir, WorldDir);
+	float PhaseR = RayleighPhase(CosTheta);
+	float PhaseM = HgPhase(CosTheta, G);
+	float Dt = T1 / float(SKY_SAMPLES);
+	float3 Lum = 0.0;
+	float3 Throughput = 1.0;
+
+	for (int S = 0; S < SKY_SAMPLES; ++S)
+	{
+		float T = Dt * (float(S) + 0.3);
+		float3 P = WorldPos + WorldDir * T;
+		float Hgt = length(P);
+		float3 Zenith = P / max(Hgt, 1e-3);
+		float H = max(Hgt - Bottom, 0.0);
+		float3 Ext = SampleExtinction(H, Dens, Rayleigh, RayExp, MieS, MieExp, MieExt, Absorp);
+		float3 SegmentT = exp(-Ext * Dt);
+		float3 RaySc = SampleRayleighScatter(H, Dens, Rayleigh, RayExp);
+		float3 MieSc = SampleMieScatter(H, Dens, MieS, MieExp);
+		float3 PhaseScatter = RaySc * PhaseR + MieSc * PhaseM;
+		float3 TSun = SampleT(Hgt, dot(SunDir, Zenith), Bottom, Top);
+		float Shadow = PlanetShadow(P, SunDir, Bottom);
+		float3 MS = SampleMS(Hgt, dot(SunDir, Zenith), Bottom, Top);
+		float3 Scatter = SunIlluminance * (Shadow * TSun * PhaseScatter + MS * (RaySc + MieSc));
+		float3 SafeExt = max(Ext, float3(1e-5, 1e-5, 1e-5));
+		Lum += Throughput * Scatter * ((1.0 - SegmentT) / SafeExt);
+		Throughput *= SegmentT;
+	}
+
+	float AvgT = dot(Throughput, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+	OutputTexture[DispatchThreadId.xy] = float4(Lum, 1.0 - AvgT);
+}

@@ -1,0 +1,319 @@
+// M2–M5 — finite-segment single scatter + LUT hybrid (sky-view / aerial).
+// Rays from UE ClipToTranslatedWorld. Miss => exact scene color (or sky-view near/inside).
+
+#include "/Engine/Public/Platform.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereGeometry.ush"
+#include "/SingularityAtmosphere/Private/AtmospherePhase.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereMedium.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereUv.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 8
+#endif
+
+#ifndef MAX_SAMPLES
+#define MAX_SAMPLES 24
+#endif
+
+Texture2D InputTexture;
+SamplerState InputSampler;
+Texture2D TransmittanceLut;
+SamplerState TransmittanceSampler;
+Texture2D MultiScatteringLut;
+SamplerState MultiScatteringSampler;
+RWTexture2D<float4> OutputTexture;
+Texture2D SkyViewLut;
+SamplerState SkyViewSampler;
+Texture3D AerialPerspectiveLut;
+SamplerState AerialSampler;
+
+uint2 ViewMin;
+uint2 ViewSize;
+float2 InputExtentInverse;
+
+float4x4 ClipToTranslatedWorld;
+float3 PlanetTranslatedCm;
+
+float BottomRadiusKm;
+float TopRadiusKm;
+float DensityScale;
+float Fade;
+float3 SunDir;
+float SunIlluminance;
+
+float4 RayleighScatterExp;
+float4 MieScatterExp;
+float4 MieExtinctionG;
+float3 Absorption;
+float4 GroundAlbBounce;
+uint DebugMode;
+uint UseLuts;
+uint UseSkyView;
+uint UseAerial;
+float ApKmPerSlice;
+float DiskHaze;      // density multiplier for rays that hit the planet surface (fills the disk)
+float DiskOpacity;   // extra soft haze opacity over the planet face [0..2]
+float3 HazeTint;     // soft-disk haze RGB (from UI color combo)
+
+float3 SampleTransmittanceLut(float ViewHeight, float CosZenith, float Bottom, float Top)
+{
+	float2 Uv = TransmittanceLutParamsToUv(Bottom, Top, ViewHeight, CosZenith);
+	return TransmittanceLut.SampleLevel(TransmittanceSampler, Uv, 0).rgb;
+}
+
+float3 SampleMultiScatteringLut(float ViewHeight, float CosSunZenith, float Bottom, float Top)
+{
+	float U = saturate(CosSunZenith * 0.5 + 0.5);
+	float V = saturate((ViewHeight - Bottom) / max(Top - Bottom, 1e-3));
+	float2 Uv = float2(FromUnitToSubUvs(U, 32.0), FromUnitToSubUvs(V, 32.0));
+	return MultiScatteringLut.SampleLevel(MultiScatteringSampler, Uv, 0).rgb;
+}
+
+float3 TransmittanceToSun(float3 Pos, float3 LightDir, float Bottom, float Top)
+{
+	if (PlanetShadow(Pos, LightDir, Bottom) < 0.5)
+	{
+		return float3(0.0, 0.0, 0.0);
+	}
+	float ViewHeight = length(Pos);
+	float3 Zenith = Pos / max(ViewHeight, 1e-3);
+	float CosZenith = dot(LightDir, Zenith);
+	if (UseLuts != 0)
+	{
+		return SampleTransmittanceLut(ViewHeight, CosZenith, Bottom, Top);
+	}
+	return OpticalDepthToSun(Pos, LightDir, Bottom, Top, 1.0,
+		RayleighScatterExp.xyz, RayleighScatterExp.w,
+		MieScatterExp.xyz, MieScatterExp.w,
+		MieExtinctionG.xyz, Absorption);
+}
+
+float4 SampleSkyView(float3 Ro, float3 Rd, float3 LightDir, float Bottom, float Top)
+{
+	float ViewHeight = length(Ro);
+	float3 Zenith = Ro / max(ViewHeight, 1e-3);
+	float CosViewZenith = clamp(dot(Rd, Zenith), -1.0, 1.0);
+	bool bIntersectsGround = RaySphereHit(RaySphereIntersect(Ro, Rd, Bottom)) && (RaySphereIntersect(Ro, Rd, Bottom).x > 0.0);
+
+	float3 Side = cross(Zenith, Rd);
+	float SideLen = length(Side);
+	float CosLightView = 1.0;
+	if (SideLen > 1e-5)
+	{
+		Side /= SideLen;
+		float3 Forward = normalize(cross(Side, Zenith));
+		float2 LightXY = float2(dot(LightDir, Forward), dot(LightDir, Side));
+		float LightXYLen = length(LightXY);
+		if (LightXYLen > 1e-5)
+		{
+			CosLightView = LightXY.x / LightXYLen;
+		}
+	}
+
+	float2 Uv = SkyViewLutParamsToUv(Bottom, ViewHeight, CosViewZenith, CosLightView, bIntersectsGround);
+	return SkyViewLut.SampleLevel(SkyViewSampler, Uv, 0);
+}
+
+float4 SampleAerial(float2 ViewportUV, float DepthKm)
+{
+	float Slice = DepthKm / max(ApKmPerSlice, 0.1);
+	float W = sqrt(saturate(Slice / 32.0));
+	float3 Uvw = float3(ViewportUV, W);
+	return AerialPerspectiveLut.SampleLevel(AerialSampler, Uvw, 0);
+}
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= ViewSize.x || DispatchThreadId.y >= ViewSize.y)
+	{
+		return;
+	}
+
+	const uint2 Pixel = ViewMin + DispatchThreadId.xy;
+	const float2 BufferUV = (float2(Pixel) + 0.5) * InputExtentInverse;
+	const float3 SceneRGB = InputTexture.SampleLevel(InputSampler, BufferUV, 0).rgb;
+
+	if (Fade < 0.001)
+	{
+		OutputTexture[Pixel] = float4(SceneRGB, 1.0);
+		return;
+	}
+
+	const float2 ViewportUV = (float2(DispatchThreadId.xy) + 0.5) / float2(ViewSize);
+	const float2 ScreenPos = float2(2.0 * ViewportUV.x - 1.0, 1.0 - 2.0 * ViewportUV.y);
+
+	const float4 NearPoint = mul(float4(ScreenPos, 1.0, 1.0), ClipToTranslatedWorld);
+	const float4 FarPoint = mul(float4(ScreenPos, 0.0, 1.0), ClipToTranslatedWorld);
+	const float3 RayOriginTranslatedCm = NearPoint.xyz * rcp(NearPoint.w);
+	const float3 Rd = normalize(NearPoint.w * FarPoint.xyz - FarPoint.w * NearPoint.xyz);
+	const float3 Ro = (RayOriginTranslatedCm - PlanetTranslatedCm) * (1.0 / 100000.0);
+
+	const float Bottom = max(BottomRadiusKm, 1.0);
+	const float Top = max(TopRadiusKm, Bottom * 1.001);
+	const float Dens = max(DensityScale, 0.001);
+	const float3 LightDir = normalize(SunDir);
+	const float CamHeight = length(Ro);
+
+	float2 HitAtmo = RaySphereIntersect(Ro, Rd, Top);
+	float2 HitPlanet = RaySphereIntersect(Ro, Rd, Bottom);
+	const bool bHitPlanet = HitPlanet.x > 0.0;
+
+	// Far empty space: exact scene (black). Near/inside miss to space: sky-view.
+	if (!RaySphereHit(HitAtmo))
+	{
+		if (UseSkyView != 0 && CamHeight < Top)
+		{
+			float4 Sky = SampleSkyView(Ro, Rd, LightDir, Bottom, Top);
+			float3 OutRGB = lerp(SceneRGB, SceneRGB * (1.0 - Sky.a) + Sky.rgb, Fade);
+			OutputTexture[Pixel] = float4(OutRGB, 1.0);
+			return;
+		}
+		OutputTexture[Pixel] = float4(SceneRGB, 1.0);
+		return;
+	}
+
+	float T0 = max(HitAtmo.x, 0.0);
+	float T1 = HitAtmo.y;
+	if (bHitPlanet)
+	{
+		T1 = min(T1, HitPlanet.x);
+	}
+	if (T1 <= T0 + 1e-4)
+	{
+		OutputTexture[Pixel] = float4(SceneRGB, 1.0);
+		return;
+	}
+
+	if (DebugMode == 1)
+	{
+		OutputTexture[Pixel] = float4(lerp(SceneRGB, float3(0.1, 0.85, 0.25), 0.55 * Fade), 1.0);
+		return;
+	}
+	if (DebugMode == 2)
+	{
+		float Seg = (T1 - T0) / max(Top - Bottom, 1.0);
+		OutputTexture[Pixel] = float4(lerp(SceneRGB, float3(Seg, Seg * 0.4, 0.1), 0.7 * Fade), 1.0);
+		return;
+	}
+
+	// Near/inside: sky-view for sky rays. Planet disk always uses path march (fills face, not only limb).
+	if (UseSkyView != 0 && !bHitPlanet)
+	{
+		float3 SamplePos = Ro;
+		if (CamHeight > Top)
+		{
+			SamplePos = Ro + Rd * T0;
+		}
+		float4 Sky = SampleSkyView(SamplePos, Rd, LightDir, Bottom, Top);
+		float3 OutRGB = lerp(SceneRGB, SceneRGB * (1.0 - Sky.a) + Sky.rgb, Fade);
+		OutputTexture[Pixel] = float4(OutRGB, 1.0);
+		return;
+	}
+
+	const float3 Rayleigh = RayleighScatterExp.xyz;
+	const float RayExp = RayleighScatterExp.w;
+	const float3 MieS = MieScatterExp.xyz;
+	const float MieExp = MieScatterExp.w;
+	const float3 MieExt = MieExtinctionG.xyz;
+	const float G = clamp(MieExtinctionG.w, 0.0, 0.95);
+	const float3 Absorp = Absorption;
+	const float3 Ground = GroundAlbBounce.xyz;
+	const float Bounce = max(GroundAlbBounce.w, 0.0);
+	const float Illum = max(SunIlluminance, 0.0);
+
+	// Boost density on surface-bound rays so the disk gets haze/opacity, not only the limb.
+	const float DiskBoost = bHitPlanet ? max(DiskHaze, 0.0) : 1.0;
+	const float DensPath = Dens * DiskBoost;
+
+	const float Span = T1 - T0;
+	float3 T = float3(1.0, 1.0, 1.0);
+	float3 L = float3(0.0, 0.0, 0.0);
+	const float CosViewSun = dot(Rd, LightDir);
+	const float PhaseR = RayleighPhase(CosViewSun);
+	const float PhaseM = HgPhase(CosViewSun, G);
+	const float Dt = Span / float(MAX_SAMPLES);
+
+	for (int I = 0; I < MAX_SAMPLES; ++I)
+	{
+		float TSample = T0 + Dt * (float(I) + 0.5);
+		float3 P = Ro + Rd * TSample;
+		float ViewHeight = length(P);
+		float H = max(ViewHeight - Bottom, 0.0);
+		float3 Zenith = P / max(ViewHeight, 1e-3);
+		float CosSunZenith = dot(LightDir, Zenith);
+		float3 Ext = SampleExtinction(H, DensPath, Rayleigh, RayExp, MieS, MieExp, MieExt, Absorp);
+		float3 SampleT = exp(-Ext * Dt);
+		float3 RayS = SampleRayleighScatter(H, DensPath, Rayleigh, RayExp);
+		float3 MieSc = SampleMieScatter(H, DensPath, MieS, MieExp);
+		float3 Scattering = RayS + MieSc;
+		float3 TSun = TransmittanceToSun(P, LightDir, Bottom, Top);
+		float3 PhaseScatter = RayS * PhaseR + MieSc * PhaseM;
+		// Day/night: no fill light on the night hemisphere (was lerp(0.02,…) + ungated MS).
+		float Day = smoothstep(-0.02, 0.18, CosSunZenith);
+		float3 Multi = 0.0;
+		if (UseLuts != 0)
+		{
+			Multi = SampleMultiScatteringLut(ViewHeight, CosSunZenith, Bottom, Top) * Scattering * TSun * Day;
+		}
+		else
+		{
+			Multi = (Scattering * 0.08 + Ground * Bounce * Scattering) * TSun * Day;
+		}
+		float3 Scat = Illum * (TSun * PhaseScatter + Multi) * Day;
+		float3 SafeExt = max(Ext, float3(1e-5, 1e-5, 1e-5));
+		L += T * Scat * ((1.0 - SampleT) / SafeExt);
+		T *= SampleT;
+	}
+
+	float3 SurfN = float3(0.0, 0.0, 1.0);
+	float DaySurf = 1.0;
+	if (bHitPlanet)
+	{
+		float3 HitP = Ro + Rd * HitPlanet.x;
+		SurfN = HitP / max(length(HitP), 1e-3);
+		DaySurf = smoothstep(-0.02, 0.22, dot(SurfN, LightDir));
+
+		// Day-side ground bounce only.
+		float NdL = saturate(dot(SurfN, LightDir));
+		float3 TSunG = TransmittanceToSun(HitP + SurfN * 0.01, LightDir, Bottom, Top);
+		float3 GroundReflect = Ground * (Bounce * 2.5 + 0.15) * Illum * NdL * TSunG * DaySurf;
+		L += T * GroundReflect;
+
+		// Soft disk haze: extinction on whole disk, emissive haze on day side only.
+		float Facing = saturate(-dot(Rd, SurfN));
+		float ThicknessKm = max(Top - Bottom, 1.0);
+		float AirMass = saturate(Span / ThicknessKm);
+		float Opt = 1.0 - exp(-DensPath * (0.08 + 0.35 * AirMass) * (0.4 + 0.6 * Facing));
+		float SoftOpacity = saturate(max(DiskOpacity, 0.0) * Opt);
+		float3 RayNorm = Rayleigh / max(max(Rayleigh.x, Rayleigh.y), max(Rayleigh.z, 1e-6));
+		float3 HazeCol = max(HazeTint, float3(0.0, 0.0, 0.0));
+		if (dot(HazeCol, float3(1.0, 1.0, 1.0)) < 1e-4)
+		{
+			HazeCol = RayNorm;
+		}
+		float3 SoftHaze = Illum * HazeCol * SoftOpacity * (0.25 + 0.55 * Facing) * DaySurf;
+		T *= (1.0 - SoftOpacity * 0.85);
+		L += SoftHaze;
+
+		if (UseAerial != 0)
+		{
+			float4 Ap = SampleAerial(ViewportUV, HitPlanet.x);
+			L += Ap.rgb * Fade * DaySurf;
+			T *= saturate(1.0 - Ap.a * 0.65);
+		}
+	}
+
+	float3 Inscatter = L * Fade;
+	float3 Transmittance = lerp(float3(1.0, 1.0, 1.0), T, Fade);
+	Transmittance = max(Transmittance, float3(0.02, 0.02, 0.02));
+
+	// Night hemisphere: crush scene fill so the shadow side stays dark (UE mesh may still be lit).
+	float3 SurfaceRGB = SceneRGB;
+	if (bHitPlanet)
+	{
+		SurfaceRGB *= lerp(0.035, 1.0, DaySurf);
+	}
+
+	OutputTexture[Pixel] = float4(SurfaceRGB * Transmittance + Inscatter, 1.0);
+}

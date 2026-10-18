@@ -1,0 +1,149 @@
+// M4 — Multiple-scattering LUT 32×32 (simplified upstream integrate; 16 dirs/pixel). MIT.
+
+#include "/Engine/Public/Platform.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereGeometry.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereUv.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereMedium.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 8
+#endif
+
+#ifndef MS_SAMPLES
+#define MS_SAMPLES 16
+#endif
+
+#ifndef DIR_COUNT
+#define DIR_COUNT 16
+#endif
+
+Texture2D TransmittanceLut;
+SamplerState TransmittanceSampler;
+RWTexture2D<float4> OutputTexture;
+
+float BottomRadiusKm;
+float TopRadiusKm;
+float DensityScale;
+float MultiScatterFactor;
+float4 RayleighScatterExp;
+float4 MieScatterExp;
+float4 MieExtinctionG;
+float3 Absorption;
+float3 GroundAlbedo;
+
+float3 SampleTransmittanceToSun(float SampleHeight, float3 Zenith, float3 SunDir, float Bottom, float Top)
+{
+	float CosSunZenith = dot(SunDir, Zenith);
+	float2 Uv = TransmittanceLutParamsToUv(Bottom, Top, SampleHeight, CosSunZenith);
+	return TransmittanceLut.SampleLevel(TransmittanceSampler, Uv, 0).rgb;
+}
+
+float3 DirFromIndex(uint Index)
+{
+	float Sample = float(Index);
+	float Theta = 6.2831853 * Sample / 1.6180339;
+	float Phi = acos(1.0 - 2.0 * (Sample + 0.5) / float(DIR_COUNT));
+	float Sp = sin(Phi);
+	return float3(cos(Theta) * Sp, sin(Theta) * Sp, cos(Phi));
+}
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint2 Dim;
+	OutputTexture.GetDimensions(Dim.x, Dim.y);
+	if (DispatchThreadId.x >= Dim.x || DispatchThreadId.y >= Dim.y)
+	{
+		return;
+	}
+
+	const float2 UvPix = (float2(DispatchThreadId.xy) + 0.5) / float2(Dim);
+	const float2 Uv = float2(
+		FromSubUvsToUnit(UvPix.x, float(Dim.x)),
+		FromSubUvsToUnit(UvPix.y, float(Dim.y)));
+
+	const float Bottom = max(BottomRadiusKm, 1.0);
+	const float Top = max(TopRadiusKm, Bottom * 1.001);
+	const float CosSunZenith = Uv.x * 2.0 - 1.0;
+	const float3 SunDir = float3(0.0, sqrt(saturate(1.0 - CosSunZenith * CosSunZenith)), CosSunZenith);
+	const float ViewHeight = Bottom + saturate(Uv.y + 0.01) * (Top - Bottom - 0.01);
+	const float3 WorldPos = float3(0.0, 0.0, ViewHeight);
+
+	const float Dens = max(DensityScale, 0.001);
+	const float3 Rayleigh = RayleighScatterExp.xyz;
+	const float RayExp = RayleighScatterExp.w;
+	const float3 MieS = MieScatterExp.xyz;
+	const float MieExp = MieScatterExp.w;
+	const float3 MieExt = MieExtinctionG.xyz;
+	const float3 Absorp = Absorption;
+	const float IsotropicPhase = 1.0 / (4.0 * 3.14159265);
+
+	float3 AccumMs = 0.0;
+	float3 AccumLum = 0.0;
+
+	for (uint DirI = 0; DirI < DIR_COUNT; ++DirI)
+	{
+		float3 WorldDir = DirFromIndex(DirI);
+		float2 HitAtmo = RaySphereIntersect(WorldPos, WorldDir, Top);
+		if (!RaySphereHit(HitAtmo))
+		{
+			continue;
+		}
+		float T0 = max(HitAtmo.x, 0.0);
+		float T1 = HitAtmo.y;
+		float2 HitPlanet = RaySphereIntersect(WorldPos, WorldDir, Bottom);
+		bool bHitGround = HitPlanet.x > 0.0;
+		if (bHitGround)
+		{
+			T1 = min(T1, HitPlanet.x);
+		}
+		if (T1 <= T0 + 1e-4)
+		{
+			continue;
+		}
+
+		float Span = T1 - T0;
+		float Dt = Span / float(MS_SAMPLES);
+		float3 Throughput = 1.0;
+		float3 Ms = 0.0;
+		float3 Lum = 0.0;
+
+		for (int S = 0; S < MS_SAMPLES; ++S)
+		{
+			float T = T0 + Dt * (float(S) + 0.3);
+			float3 SamplePos = WorldPos + WorldDir * T;
+			float SampleHeight = length(SamplePos);
+			float3 Zenith = SamplePos / max(SampleHeight, 1e-3);
+			float H = max(SampleHeight - Bottom, 0.0);
+
+			float3 Ext = SampleExtinction(H, Dens, Rayleigh, RayExp, MieS, MieExp, MieExt, Absorp);
+			float3 SampleT = exp(-Ext * Dt);
+			float3 Scatter = SampleRayleighScatter(H, Dens, Rayleigh, RayExp)
+				+ SampleMieScatter(H, Dens, MieS, MieExp);
+			float3 TSun = SampleTransmittanceToSun(SampleHeight, Zenith, SunDir, Bottom, Top);
+			float Shadow = PlanetShadow(SamplePos, SunDir, Bottom);
+			float3 SafeExt = max(Ext, float3(1e-5, 1e-5, 1e-5));
+			float3 Integ = (1.0 - SampleT) / SafeExt;
+
+			Ms += Throughput * Scatter * Integ;
+			Lum += Throughput * (Shadow * TSun * Scatter * IsotropicPhase) * Integ;
+			Throughput *= SampleT;
+		}
+
+		if (bHitGround)
+		{
+			float3 SamplePos = WorldPos + WorldDir * HitPlanet.x;
+			float3 Zenith = normalize(SamplePos);
+			float3 TSun = SampleTransmittanceToSun(length(SamplePos), Zenith, SunDir, Bottom, Top);
+			float NDotL = saturate(dot(Zenith, SunDir));
+			Lum += TSun * Throughput * NDotL * GroundAlbedo / 3.14159265;
+		}
+
+		AccumMs += Ms / float(DIR_COUNT);
+		AccumLum += Lum / float(DIR_COUNT);
+	}
+
+	float3 Denom = max(1.0 - AccumMs, float3(0.05, 0.05, 0.05));
+	float3 Result = MultiScatterFactor * (AccumLum / Denom);
+	OutputTexture[DispatchThreadId.xy] = float4(Result, 1.0);
+}

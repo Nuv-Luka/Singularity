@@ -1,0 +1,76 @@
+// Transmittance LUT UV mapping (upstream uv.wgsl / render_transmittance_lut.wgsl). MIT.
+
+#ifndef SINGULARITY_ATMOSPHERE_UV_USH
+#define SINGULARITY_ATMOSPHERE_UV_USH
+
+float FromSubUvsToUnit(float U, float Resolution)
+{
+	return (U - 0.5 / Resolution) * (Resolution / (Resolution - 1.0));
+}
+
+float FromUnitToSubUvs(float U, float Resolution)
+{
+	return (U + 0.5 / Resolution) * ((Resolution + 1.0) / Resolution);
+}
+
+// Inverse of transmittance_lut_params_to_uv: UV -> (viewHeight, cosViewZenith)
+float2 UvToTransmittanceLutParams(float2 Uv, float BottomRadius, float TopRadius)
+{
+	float XMu = Uv.x;
+	float XR = Uv.y;
+	float BottomSq = BottomRadius * BottomRadius;
+	float HSq = TopRadius * TopRadius - BottomSq;
+	float H = sqrt(max(HSq, 0.0));
+	float Rho = H * XR;
+	float RhoSq = Rho * Rho;
+	float ViewHeight = sqrt(RhoSq + BottomSq);
+	float DMin = TopRadius - ViewHeight;
+	float DMax = Rho + H;
+	float D = DMin + XMu * (DMax - DMin);
+	float CosZenith = 1.0;
+	if (D > 1e-6)
+	{
+		CosZenith = clamp((HSq - RhoSq - D * D) / (2.0 * ViewHeight * D), -1.0, 1.0);
+	}
+	return float2(ViewHeight, CosZenith);
+}
+
+float2 TransmittanceLutParamsToUv(float BottomRadius, float TopRadius, float ViewHeight, float CosViewZenith)
+{
+	float HeightSq = ViewHeight * ViewHeight;
+	float BottomSq = BottomRadius * BottomRadius;
+	float TopSq = TopRadius * TopRadius;
+	float H = sqrt(max(0.0, TopSq - BottomSq));
+	float Rho = sqrt(max(0.0, HeightSq - BottomSq));
+	float Discriminant = HeightSq * (CosViewZenith * CosViewZenith - 1.0) + TopSq;
+	float DistanceToBoundary = max(0.0, (-ViewHeight * CosViewZenith + sqrt(max(Discriminant, 0.0))));
+	float MinDistance = TopRadius - ViewHeight;
+	float MaxDistance = Rho + H;
+	float XMu = (DistanceToBoundary - MinDistance) / max(MaxDistance - MinDistance, 1e-6);
+	float XR = Rho / max(H, 1e-6);
+	return float2(saturate(XMu), saturate(XR));
+}
+
+// Sun-centric sky-view V mapping (upstream sky_view.wgsl).
+float SkyViewLutParamsToV(float BottomRadius, float ViewHeight, float CosViewZenith, bool bIntersectsGround)
+{
+	float VHorizon = sqrt(max(ViewHeight * ViewHeight - BottomRadius * BottomRadius, 0.0));
+	float GroundToHorizon = acos(clamp(VHorizon / max(ViewHeight, 1e-3), -1.0, 1.0));
+	float ZenithHorizon = 3.14159265 - GroundToHorizon;
+	if (!bIntersectsGround)
+	{
+		float Coord = 1.0 - sqrt(max(1.0 - acos(clamp(CosViewZenith, -1.0, 1.0)) / max(ZenithHorizon, 1e-4), 0.0));
+		return Coord * 0.5;
+	}
+	float Coord = (acos(clamp(CosViewZenith, -1.0, 1.0)) - ZenithHorizon) / max(GroundToHorizon, 1e-4);
+	return sqrt(max(Coord, 0.0)) * 0.5 + 0.5;
+}
+
+float2 SkyViewLutParamsToUv(float BottomRadius, float ViewHeight, float CosViewZenith, float CosLightView, bool bIntersectsGround)
+{
+	float U = FromUnitToSubUvs(sqrt(max(-CosLightView * 0.5 + 0.5, 0.0)), 192.0);
+	float V = FromUnitToSubUvs(SkyViewLutParamsToV(BottomRadius, ViewHeight, CosViewZenith, bIntersectsGround), 108.0);
+	return float2(U, V);
+}
+
+#endif

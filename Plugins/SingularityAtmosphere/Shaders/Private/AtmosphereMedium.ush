@@ -1,0 +1,75 @@
+#ifndef SINGULARITY_ATMOSPHERE_MEDIUM_USH
+#define SINGULARITY_ATMOSPHERE_MEDIUM_USH
+
+// Density / extinction sampling. Radii and heights in kilometers.
+// Rayleigh/Mie coefficients are km^-1 at sea level (density=1).
+
+float3 SampleExtinction(
+	float HeightKm,
+	float Dens,
+	float3 Rayleigh,
+	float RayExp,
+	float3 MieS,
+	float MieExp,
+	float3 MieExt,
+	float3 Absorp)
+{
+	float H = max(HeightKm, 0.0);
+	float MieD = exp(MieExp * H) * Dens;
+	float RayD = exp(RayExp * H) * Dens;
+	float AbsD = Dens * max(0.0, 1.0 - abs(H - 25.0) / 15.0);
+	// Soft clamp — allow denser disk fills without NaNs from huge OD steps.
+	return min(MieD * MieExt + RayD * Rayleigh + AbsD * Absorp, float3(8.0, 8.0, 8.0));
+}
+
+float3 SampleRayleighScatter(float HeightKm, float Dens, float3 Rayleigh, float RayExp)
+{
+	return exp(RayExp * max(HeightKm, 0.0)) * Dens * Rayleigh;
+}
+
+float3 SampleMieScatter(float HeightKm, float Dens, float3 MieS, float MieExp)
+{
+	return exp(MieExp * max(HeightKm, 0.0)) * Dens * MieS;
+}
+
+float PlanetShadow(float3 Pos, float3 LightDir, float BottomKm)
+{
+	float2 Hit = RaySphereIntersect(Pos, LightDir, BottomKm * 0.998);
+	return Hit.x > 0.0 ? 0.0 : 1.0;
+}
+
+float3 OpticalDepthToSun(
+	float3 Pos,
+	float3 LightDir,
+	float BottomKm,
+	float TopKm,
+	float Dens,
+	float3 Rayleigh,
+	float RayExp,
+	float3 MieS,
+	float MieExp,
+	float3 MieExt,
+	float3 Absorp)
+{
+	if (PlanetShadow(Pos, LightDir, BottomKm) < 0.5)
+	{
+		return float3(0.0, 0.0, 0.0);
+	}
+	float2 HitA = RaySphereIntersect(Pos, LightDir, TopKm);
+	if (HitA.y <= 0.0)
+	{
+		return float3(1.0, 1.0, 1.0);
+	}
+	const int SunSamples = 8;
+	float Dt = HitA.y / float(SunSamples);
+	float3 Od = 0.0;
+	for (int I = 0; I < SunSamples; ++I)
+	{
+		float T = (float(I) + 0.5) * Dt;
+		float3 P = Pos + LightDir * T;
+		Od += SampleExtinction(length(P) - BottomKm, Dens, Rayleigh, RayExp, MieS, MieExp, MieExt, Absorp) * Dt;
+	}
+	return exp(-min(Od, float3(80.0, 80.0, 80.0)));
+}
+
+#endif

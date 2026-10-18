@@ -1,0 +1,128 @@
+// M5 — Aerial perspective volume 32×32×32 (simplified upstream). MIT.
+// Stores float4(inscatter.rgb, 1-avgTransmittance) along frustum depth slices.
+
+#include "/Engine/Public/Platform.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereGeometry.ush"
+#include "/SingularityAtmosphere/Private/AtmospherePhase.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereMedium.ush"
+#include "/SingularityAtmosphere/Private/AtmosphereUv.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 8
+#endif
+
+Texture2D TransmittanceLut;
+SamplerState TransmittanceSampler;
+Texture2D MultiScatteringLut;
+SamplerState MultiScatteringSampler;
+RWTexture3D<float4> OutputTexture;
+
+float BottomRadiusKm;
+float TopRadiusKm;
+float DensityScale;
+float3 CamPosKm;
+float3 CamRight;
+float3 CamUp;
+float3 CamForward;
+float TanHalfFovY;
+float Aspect;
+float3 SunDir;
+float SunIlluminance;
+float ApKmPerSlice;
+float4 RayleighScatterExp;
+float4 MieScatterExp;
+float4 MieExtinctionG;
+float3 Absorption;
+
+float3 SampleT(float ViewHeight, float CosZenith, float Bottom, float Top)
+{
+	return TransmittanceLut.SampleLevel(TransmittanceSampler, TransmittanceLutParamsToUv(Bottom, Top, ViewHeight, CosZenith), 0).rgb;
+}
+
+float3 SampleMS(float ViewHeight, float CosSunZenith, float Bottom, float Top)
+{
+	float U = saturate(CosSunZenith * 0.5 + 0.5);
+	float V = saturate((ViewHeight - Bottom) / max(Top - Bottom, 1e-3));
+	return MultiScatteringLut.SampleLevel(MultiScatteringSampler,
+		float2(FromUnitToSubUvs(U, 32.0), FromUnitToSubUvs(V, 32.0)), 0).rgb;
+}
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 4)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint3 Dim;
+	OutputTexture.GetDimensions(Dim.x, Dim.y, Dim.z);
+	if (DispatchThreadId.x >= Dim.x || DispatchThreadId.y >= Dim.y || DispatchThreadId.z >= Dim.z)
+	{
+		return;
+	}
+
+	const float2 Uv = (float2(DispatchThreadId.xy) + 0.5) / float2(Dim.xy);
+	const float2 Ndc = float2(Uv.x * 2.0 - 1.0, 1.0 - Uv.y * 2.0);
+	const float3 Rd = normalize(CamForward + CamRight * (Ndc.x * TanHalfFovY * Aspect) + CamUp * (Ndc.y * TanHalfFovY));
+
+	const float Bottom = max(BottomRadiusKm, 1.0);
+	const float Top = max(TopRadiusKm, Bottom * 1.001);
+	const float Slice = (float(DispatchThreadId.z) + 0.5) / float(Dim.z);
+	const float TMax = (Slice * Slice) * float(Dim.z) * max(ApKmPerSlice, 0.1);
+
+	float3 WorldPos = CamPosKm;
+	float ViewHeight = length(WorldPos);
+	if (ViewHeight >= Top)
+	{
+		float2 Hit = RaySphereIntersect(WorldPos, Rd, Top);
+		if (!RaySphereHit(Hit) || Hit.x > TMax)
+		{
+			OutputTexture[DispatchThreadId] = float4(0, 0, 0, 0);
+			return;
+		}
+		WorldPos = WorldPos + Rd * max(Hit.x, 0.0);
+	}
+
+	const float Dens = max(DensityScale, 0.001);
+	const float3 Rayleigh = RayleighScatterExp.xyz;
+	const float RayExp = RayleighScatterExp.w;
+	const float3 MieS = MieScatterExp.xyz;
+	const float MieExp = MieScatterExp.w;
+	const float3 MieExt = MieExtinctionG.xyz;
+	const float G = clamp(MieExtinctionG.w, 0.0, 0.95);
+	const float3 Absorp = Absorption;
+	const float3 LightDir = normalize(SunDir);
+
+	const int SampleCount = max(int(DispatchThreadId.z) * 2 + 2, 4);
+	const float Dt = TMax / float(SampleCount);
+	float CosTheta = dot(LightDir, Rd);
+	float PhaseR = RayleighPhase(CosTheta);
+	float PhaseM = HgPhase(CosTheta, G);
+	float3 Lum = 0.0;
+	float3 Throughput = 1.0;
+
+	for (int S = 0; S < 64; ++S)
+	{
+		if (S >= SampleCount) break;
+		float T = Dt * (float(S) + 0.3);
+		float3 P = WorldPos + Rd * T;
+		float Hgt = length(P);
+		if (Hgt < Bottom * 0.999)
+		{
+			break;
+		}
+		float3 Zenith = P / max(Hgt, 1e-3);
+		float H = max(Hgt - Bottom, 0.0);
+		float3 Ext = SampleExtinction(H, Dens, Rayleigh, RayExp, MieS, MieExp, MieExt, Absorp);
+		float3 SegmentT = exp(-Ext * Dt);
+		float3 RaySc = SampleRayleighScatter(H, Dens, Rayleigh, RayExp);
+		float3 MieSc = SampleMieScatter(H, Dens, MieS, MieExp);
+		float3 PhaseScatter = RaySc * PhaseR + MieSc * PhaseM;
+		float3 TSun = SampleT(Hgt, dot(LightDir, Zenith), Bottom, Top);
+		float Shadow = PlanetShadow(P, LightDir, Bottom);
+		float3 MS = SampleMS(Hgt, dot(LightDir, Zenith), Bottom, Top);
+		float3 Scatter = SunIlluminance * (Shadow * TSun * PhaseScatter + MS * (RaySc + MieSc));
+		float3 SafeExt = max(Ext, float3(1e-5, 1e-5, 1e-5));
+		Lum += Throughput * Scatter * ((1.0 - SegmentT) / SafeExt);
+		Throughput *= SegmentT;
+	}
+
+	float AvgT = dot(Throughput, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+	OutputTexture[DispatchThreadId] = float4(Lum, 1.0 - AvgT);
+}

@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.8.0-r8",
+	"FriendlyName": "Singularity Planet Terrain Next",
+	"Description": "Isolated replacement for landable rocky-moon terrain. R8 polish (peripheral LOD, stage timings); R7 descent deferred. Does not own orbits, gas giants, or atmospheres.",
+	"Category": "Rendering",
+	"CreatedBy": "SINGULARITY",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "ProceduralMeshComponent",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "SingularityPlanetTerrainNext",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

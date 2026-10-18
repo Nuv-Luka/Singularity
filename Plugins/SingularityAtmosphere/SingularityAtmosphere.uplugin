@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0-m1",
+	"FriendlyName": "Singularity Atmosphere",
+	"Description": "Planet-local Hillaire atmospheric scattering (WebGPU sky-atmosphere port). M1: identity compute only.",
+	"Category": "Rendering",
+	"CreatedBy": "SINGULARITY",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SingularityAtmosphere",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
+	]
+}

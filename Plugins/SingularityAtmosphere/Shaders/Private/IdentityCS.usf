@@ -1,0 +1,31 @@
+// SingularityAtmosphere — M1 identity compute (no scattering).
+// Reads HDR scene color and writes an identical copy to a UAV.
+
+#include "/Engine/Public/Platform.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 8
+#endif
+
+Texture2D InputTexture;
+SamplerState InputSampler;
+RWTexture2D<float4> OutputTexture;
+
+uint2 ViewMin;
+uint2 ViewSize;
+float2 InputExtentInverse;
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= ViewSize.x || DispatchThreadId.y >= ViewSize.y)
+	{
+		return;
+	}
+
+	const uint2 Pixel = ViewMin + DispatchThreadId.xy;
+	const float2 UV = (float2(Pixel) + 0.5) * InputExtentInverse;
+	const float4 Color = InputTexture.SampleLevel(InputSampler, UV, 0);
+	// Keep RGB; force opaque A so later passes do not treat the buffer as empty.
+	OutputTexture[Pixel] = float4(Color.rgb, 1.0);
+}
