@@ -2,6 +2,7 @@
 #include "PlanetTerrainNextCoordinates.h"
 #include "PlanetTerrainNextDiag.h"
 #include "PlanetTerrainNextHeightField.h"
+#include "PlanetTerrainNextLodFade.h"
 #include "PlanetTerrainNextPatchMesh.h"
 #include "PlanetTerrainNextTypes.h"
 
@@ -115,6 +116,59 @@ bool FPlanetTerrainNextR101DiagCollectNodesTest::RunTest(const FString& Paramete
 	S.Level = 2;
 	PlanetTerrainNextDiag::CollectNodes(S, Nodes);
 	TestEqual(TEXT("six faces L2 = 6*16"), Nodes.Num(), 96);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPlanetTerrainNextR102LodFadeComplementTest,
+	"Singularity.PlanetTerrainNext.R10.LodFadeComplement",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetTerrainNextR102LodFadeComplementTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	const FPlanetTerrainNextNodeId Parent(1, 0, 0, 0);
+	TSet<FPlanetTerrainNextNodeId> Desired;
+	for (int32 C = 0; C < 4; ++C)
+	{
+		Desired.Add(Parent.Child(C));
+	}
+	TestTrue(TEXT("desired has children"), PlanetTerrainNextLodFade::DesiredHasAllChildren(Desired, Parent));
+
+	FPlanetTerrainNextLodFade Fade;
+	Fade.Parent = Parent;
+	Fade.State = EPlanetTerrainNextLodFadeState::FadingToChildren;
+	Fade.Progress = 0.0f;
+	Fade.DurationSeconds = 0.5f;
+	Fade.Direction = 1;
+
+	TArray<FPlanetTerrainNextLodFade> Fades;
+	Fades.Add(Fade);
+	TSet<FPlanetTerrainNextNodeId> Render;
+	PlanetTerrainNextLodFade::BuildRenderSet(Desired, Fades, Render);
+	TestTrue(TEXT("render keeps parent during fade"), Render.Contains(Parent));
+	TestEqual(TEXT("render has parent+4 children"), Render.Num(), 5);
+
+	TestFalse(TEXT("not complete at start"), PlanetTerrainNextLodFade::TickFade(Fades[0], 0.1f));
+	TestTrue(TEXT("progress advanced"), Fades[0].Progress > 0.15f && Fades[0].Progress < 0.25f);
+
+	// Finish fade
+	while (!PlanetTerrainNextLodFade::TickFade(Fades[0], 0.1f))
+	{
+	}
+	TestEqual(TEXT("progress done"), Fades[0].Progress, 1.0f);
+	TestEqual(TEXT("state stable"), static_cast<int32>(Fades[0].State), static_cast<int32>(EPlanetTerrainNextLodFadeState::Stable));
+
+	// Reverse mid progress
+	FPlanetTerrainNextLodFade Rev;
+	Rev.Parent = Parent;
+	Rev.State = EPlanetTerrainNextLodFadeState::FadingToChildren;
+	Rev.Progress = 0.6f;
+	Rev.DurationSeconds = 0.4f;
+	Rev.Direction = -1;
+	Rev.State = EPlanetTerrainNextLodFadeState::FadingToParent;
+	PlanetTerrainNextLodFade::TickFade(Rev, 0.1f);
+	TestTrue(TEXT("reverse decreases"), Rev.Progress < 0.6f);
 	return true;
 }
 

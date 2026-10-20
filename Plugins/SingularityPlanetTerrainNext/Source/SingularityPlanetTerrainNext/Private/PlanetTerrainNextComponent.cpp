@@ -3,6 +3,7 @@
 #include "PlanetTerrainNextCoordinates.h"
 #include "PlanetTerrainNextDiag.h"
 #include "PlanetTerrainNextHeightTile.h"
+#include "PlanetTerrainNextLodFade.h"
 #include "PlanetTerrainNextLog.h"
 #include "PlanetTerrainNextMorphMaterial.h"
 #include "PlanetTerrainNextPatchMesh.h"
@@ -14,6 +15,7 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformTime.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ProceduralMeshComponent.h"
@@ -131,6 +133,10 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 
 	BuildTimesMs.Reset();
 	BuildTimeCursor = 0;
+	FrameTimeMsSamples.Reset();
+	FrameTimeSampleCursor = 0;
+	FrameTimeSortCounter = 0;
+	FrameStats = FPlanetTerrainNextFrameStats();
 	bInitialized = true;
 
 	// Coverage before anything else: all six roots resident before the first draw.
@@ -143,7 +149,7 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 	Quadtree.CollectDrawSet([this](const FPlanetTerrainNextNodeId& Id) { return Resident.Contains(Id); }, DrawSet);
 	FrameStats.bDrawCoverageOk = CheckDrawCoverage(DrawSet);
 	FrameStats.Drawn = DrawSet.Num();
-	ApplyDrawSet(DrawSet);
+	ApplyDrawSet(DrawSet, 1.0f / 60.0f);
 	RefreshTilePins(DrawSet);
 	ApplyMorph(DrawSet, 1.0f / 60.0f);
 
@@ -186,6 +192,7 @@ void UPlanetTerrainNextComponent::ShutdownTerrain()
 	Resident.Reset();
 	Drawn.Reset();
 	HandoffHoldFrames.Reset();
+	LodFades.Reset();
 	if (GpuPool.IsValid())
 	{
 		GpuPool->Shutdown();
@@ -465,9 +472,8 @@ void UPlanetTerrainNextComponent::ReleaseNode(const FPlanetTerrainNextNodeId& Id
 	Slot.Tangents.Reset();
 	Slot.BaseUVs.Reset();
 	Slot.BaseColors.Reset();
-	// R10.1: UpdateMeshSection never rewrites indices — drop the section so the next
-	// BuildNode CreateMeshSection installs the current IndexBufferVersion.
-	ClearSlotSection(Slot);
+	// Keep a compatible section in the pool. UpdateMeshSection preserves its index buffer;
+	// ShouldRecreateSection checks topology version and both array sizes before reuse.
 	Drawn.Remove(Id);
 	FreeSlots.Add(SlotIndex);
 }
@@ -477,18 +483,26 @@ void UPlanetTerrainNextComponent::ClearSlotSection(FSlot& Slot)
 	if (Slot.Mesh && Slot.bHasSection)
 	{
 		Slot.Mesh->ClearMeshSection(0);
+		++FrameStats.MeshSectionClears;
 	}
 	Slot.bHasSection = false;
 	Slot.IndexBufferVersion = -1;
+	Slot.SectionVertexCount = 0;
+	Slot.SectionIndexCount = 0;
 }
 
-bool UPlanetTerrainNextComponent::ShouldRecreateSection(const FSlot& Slot, bool bAllowForceFresh) const
+bool UPlanetTerrainNextComponent::ShouldRecreateSection(
+	const FSlot& Slot, bool bAllowForceFresh, int32 VertexCount, int32 IndexCount) const
 {
 	if (!Slot.bHasSection)
 	{
 		return true;
 	}
 	if (Slot.IndexBufferVersion != PlanetTerrainNextPatch::GetIndexBufferVersion())
+	{
+		return true;
+	}
+	if (Slot.SectionVertexCount != VertexCount || Slot.SectionIndexCount != IndexCount)
 	{
 		return true;
 	}
@@ -517,6 +531,7 @@ void UPlanetTerrainNextComponent::ApplySuspendedProxyVisibility(bool bShowProxy)
 
 bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_BuildNode);
 	if (!HeightField.IsValid() || !TileCache.IsValid() || !GpuPool.IsValid() || Resident.Contains(Id))
 	{
 		return false;
@@ -578,9 +593,10 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 
 	// F16 UV×MorphScaleCm quantization: ULP~1e-3 near 1 → Scale>1000cm ≈ >1cm vertex error.
 	// Raw cm packing also overflows F16 at 65504. Either case → CPU morph (true WPO disconnect).
-	const bool bCpuMorph = !Settings.bMorphWpoEnabled
-		|| Id.Level <= Settings.MorphCpuMaxLevel
-		|| Patch.MaxAbsCoarseDeltaCm > static_cast<double>(Settings.MorphGpuMaxScaleCm);
+	const bool bCpuMorph = Settings.bEnableLegacyMorph
+		&& (!Settings.bMorphWpoEnabled
+			|| Id.Level <= Settings.MorphCpuMaxLevel
+			|| Patch.MaxAbsCoarseDeltaCm > static_cast<double>(Settings.MorphGpuMaxScaleCm));
 
 	if (Patch.MaxAbsCoarseDeltaCm > 65504.0)
 	{
@@ -619,6 +635,7 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 
 void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainNextPatchData& Patch)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_UploadPatch);
 	Slot.Mesh->SetRelativeLocation(Patch.OriginM * PlanetTerrainNext::CmPerMeter);
 
 	Slot.Tangents.Reset();
@@ -652,13 +669,14 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 			Tangents.Add(FProcMeshTangent(Tangent, false));
 		}
 
-		if (ShouldRecreateSection(Slot, true))
+		const TArray<int32>& Indices = PlanetTerrainNextPatch::Indices();
+		if (ShouldRecreateSection(Slot, true, Patch.VerticesCm.Num(), Indices.Num()))
 		{
 			ClearSlotSection(Slot);
 			Slot.Mesh->CreateMeshSection_LinearColor(
 				0,
 				Patch.VerticesCm,
-				PlanetTerrainNextPatch::Indices(),
+				Indices,
 				Patch.Normals,
 				Patch.UVs,
 				Patch.UV1,
@@ -673,6 +691,10 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 			}
 			Slot.bHasSection = true;
 			Slot.IndexBufferVersion = PlanetTerrainNextPatch::GetIndexBufferVersion();
+			Slot.SectionVertexCount = Patch.VerticesCm.Num();
+			Slot.SectionIndexCount = Indices.Num();
+			++FrameStats.MeshSectionCreates;
+			++FrameStats.MeshResourceRebuilds;
 		}
 		else
 		{
@@ -686,6 +708,7 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 				TArray<FVector2D>(),
 				Patch.VertexColors,
 				Tangents);
+			++FrameStats.MeshSectionUpdates;
 		}
 	}
 
@@ -705,6 +728,8 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 
 void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_UploadCpuMorphedSection);
+	const double UploadStart = FPlatformTime::Seconds();
 	const int32 Num = Slot.FineCm.Num();
 	if (Num == 0 || Slot.CoarseCm.Num() != Num || !Slot.Mesh)
 	{
@@ -740,13 +765,14 @@ void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
 	}
 
 	// Morph animation Updates in place; recreate only if section missing or index version stale.
-	if (ShouldRecreateSection(Slot, false))
+	const TArray<int32>& Indices = PlanetTerrainNextPatch::Indices();
+	if (ShouldRecreateSection(Slot, false, Num, Indices.Num()))
 	{
 		ClearSlotSection(Slot);
 		Slot.Mesh->CreateMeshSection_LinearColor(
 			0,
 			Positions,
-			PlanetTerrainNextPatch::Indices(),
+			Indices,
 			Normals,
 			Slot.BaseUVs,
 			UV1,
@@ -761,6 +787,10 @@ void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
 		}
 		Slot.bHasSection = true;
 		Slot.IndexBufferVersion = PlanetTerrainNextPatch::GetIndexBufferVersion();
+		Slot.SectionVertexCount = Num;
+		Slot.SectionIndexCount = Indices.Num();
+		++FrameStats.MeshSectionCreates;
+		++FrameStats.MeshResourceRebuilds;
 	}
 	else
 	{
@@ -774,19 +804,34 @@ void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
 			TArray<FVector2D>(),
 			Slot.BaseColors,
 			Tangents);
+		++FrameStats.MeshSectionUpdates;
+	}
+	++FrameStats.CpuMorphUploads;
+	FrameStats.CpuMorphUploadMs += (FPlatformTime::Seconds() - UploadStart) * 1000.0;
+}
+
+void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds)
+{
+	TSet<FPlanetTerrainNextNodeId> Desired;
+	Desired.Reserve(DrawSet.Num() + 8);
+	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
+	{
+		Desired.Add(Item.Id);
+	}
+
+	if (Settings.bEnableDitheredLOD)
+	{
+		ApplyDrawSetDithered(Desired, DeltaSeconds);
+	}
+	else
+	{
+		LodFades.Reset();
+		ApplyDrawSetExclusive(Desired);
 	}
 }
 
-void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet)
+void UPlanetTerrainNextComponent::ApplyDrawSetExclusive(TSet<FPlanetTerrainNextNodeId>& Next)
 {
-	TSet<FPlanetTerrainNextNodeId> Next;
-	Next.Reserve(DrawSet.Num() + 8);
-	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
-	{
-		Next.Add(Item.Id);
-	}
-
-	// Hold parent for MorphHandoffFrames while children stay stripped (no co-draw / pop).
 	FrameStats.HandoffParentsKept = ApplyLodHandoff(
 		Drawn,
 		Next,
@@ -802,16 +847,173 @@ void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDr
 			return false;
 		});
 
+	SyncVisibilityToRenderSet(Next);
+	ApplyLodFadeParams();
+	Drawn = MoveTemp(Next);
+	FrameStats.ActiveLodFades = 0;
+	FrameStats.MeanLodFade = 0.0f;
+}
+
+int32 UPlanetTerrainNextComponent::FindLodFadeIndex(const FPlanetTerrainNextNodeId& Parent) const
+{
+	for (int32 Index = 0; Index < LodFades.Num(); ++Index)
+	{
+		if (LodFades[Index].Parent == Parent)
+		{
+			return Index;
+		}
+	}
+	return INDEX_NONE;
+}
+
+void UPlanetTerrainNextComponent::ApplyDrawSetDithered(
+	const TSet<FPlanetTerrainNextNodeId>& Desired,
+	float DeltaSeconds)
+{
+	HandoffHoldFrames.Reset();
+	auto IsRes = [this](const FPlanetTerrainNextNodeId& Id) { return Resident.Contains(Id); };
+
+	// Reverse mid-fade if Desired flipped direction.
+	for (FPlanetTerrainNextLodFade& Fade : LodFades)
+	{
+		const bool bWantChildren = PlanetTerrainNextLodFade::DesiredHasAllChildren(Desired, Fade.Parent);
+		const bool bWantParent = Desired.Contains(Fade.Parent);
+		if (Fade.State == EPlanetTerrainNextLodFadeState::FadingToChildren && bWantParent && !bWantChildren)
+		{
+			Fade.State = EPlanetTerrainNextLodFadeState::FadingToParent;
+			Fade.Direction = -1;
+		}
+		else if (Fade.State == EPlanetTerrainNextLodFadeState::FadingToParent && bWantChildren && !bWantParent)
+		{
+			Fade.State = EPlanetTerrainNextLodFadeState::FadingToChildren;
+			Fade.Direction = 1;
+		}
+	}
+
+	// Start split fades: previous parent leaf → four resident children in Desired.
+	for (const FPlanetTerrainNextNodeId& Prev : Drawn)
+	{
+		if (Desired.Contains(Prev))
+		{
+			continue;
+		}
+		if (!PlanetTerrainNextLodFade::DesiredHasAllChildren(Desired, Prev))
+		{
+			continue;
+		}
+		if (!PlanetTerrainNextLodFade::ChildrenResident(Prev, IsRes))
+		{
+			continue;
+		}
+		if (FindLodFadeIndex(Prev) != INDEX_NONE)
+		{
+			continue;
+		}
+		if (LodFades.Num() >= Settings.MaxConcurrentTransitionGroups)
+		{
+			continue;
+		}
+		FPlanetTerrainNextLodFade Fade;
+		Fade.Parent = Prev;
+		Fade.State = EPlanetTerrainNextLodFadeState::FadingToChildren;
+		Fade.Progress = 0.0f;
+		Fade.DurationSeconds = Settings.LodTransitionSeconds;
+		Fade.Direction = 1;
+		Fade.GenerationEpoch = HeightField.IsValid() ? HeightField->GetIdentityHash() : 0;
+		LodFades.Add(Fade);
+	}
+
+	// Start merge fades: four children drawn → parent in Desired and resident.
+	TSet<FPlanetTerrainNextNodeId> CheckedParents;
+	for (const FPlanetTerrainNextNodeId& Id : Drawn)
+	{
+		if (Id.Level == 0)
+		{
+			continue;
+		}
+		const FPlanetTerrainNextNodeId Parent(Id.Face, static_cast<uint8>(Id.Level - 1), Id.X >> 1, Id.Y >> 1);
+		if (CheckedParents.Contains(Parent))
+		{
+			continue;
+		}
+		CheckedParents.Add(Parent);
+		if (!Desired.Contains(Parent) || !Resident.Contains(Parent))
+		{
+			continue;
+		}
+		bool bAllChildrenDrawn = true;
+		for (int32 C = 0; C < 4; ++C)
+		{
+			if (!Drawn.Contains(Parent.Child(C)))
+			{
+				bAllChildrenDrawn = false;
+				break;
+			}
+		}
+		if (!bAllChildrenDrawn)
+		{
+			continue;
+		}
+		if (FindLodFadeIndex(Parent) != INDEX_NONE)
+		{
+			continue;
+		}
+		if (LodFades.Num() >= Settings.MaxConcurrentTransitionGroups)
+		{
+			continue;
+		}
+		FPlanetTerrainNextLodFade Fade;
+		Fade.Parent = Parent;
+		Fade.State = EPlanetTerrainNextLodFadeState::FadingToParent;
+		Fade.Progress = 1.0f;
+		Fade.DurationSeconds = Settings.LodTransitionSeconds;
+		Fade.Direction = -1;
+		Fade.GenerationEpoch = HeightField.IsValid() ? HeightField->GetIdentityHash() : 0;
+		LodFades.Add(Fade);
+	}
+
+	// Advance fades; drop completed groups.
+	for (int32 Index = LodFades.Num() - 1; Index >= 0; --Index)
+	{
+		FPlanetTerrainNextLodFade& Fade = LodFades[Index];
+		if (HeightField.IsValid() && Fade.GenerationEpoch != HeightField->GetIdentityHash())
+		{
+			LodFades.RemoveAtSwap(Index);
+			continue;
+		}
+		if (PlanetTerrainNextLodFade::TickFade(Fade, DeltaSeconds))
+		{
+			LodFades.RemoveAtSwap(Index);
+		}
+	}
+
+	TSet<FPlanetTerrainNextNodeId> Render;
+	PlanetTerrainNextLodFade::BuildRenderSet(Desired, LodFades, Render);
+	// Keep fading parents/children resident-visible even if Desired dropped them early.
+	SyncVisibilityToRenderSet(Render);
+	ApplyLodFadeParams();
+	Drawn = MoveTemp(Render);
+
+	float FadeSum = 0.0f;
+	for (const FPlanetTerrainNextLodFade& Fade : LodFades)
+	{
+		FadeSum += Fade.Progress;
+	}
+	FrameStats.ActiveLodFades = LodFades.Num();
+	FrameStats.MeanLodFade = LodFades.Num() > 0 ? FadeSum / LodFades.Num() : 0.0f;
+	FrameStats.HandoffParentsKept = LodFades.Num();
+}
+
+void UPlanetTerrainNextComponent::SyncVisibilityToRenderSet(const TSet<FPlanetTerrainNextNodeId>& Render)
+{
 	int32 Changes = 0;
-	// Show first, then hide, so a frame never has fewer patches than the coverage requires.
-	for (const FPlanetTerrainNextNodeId& Id : Next)
+	for (const FPlanetTerrainNextNodeId& Id : Render)
 	{
 		if (const int32* SlotIndex = Resident.Find(Id))
 		{
 			FSlot& Slot = Slots[*SlotIndex];
 			if (!Slot.bShown)
 			{
-				// R9.2: first frame visible → parent-compatible morph; reveal starts now (not while hidden).
 				BeginVisibleHandoff(Slot);
 				Slot.Mesh->SetVisibility(true);
 				Slot.Mesh->SetCastShadow(Settings.bCastShadow);
@@ -830,7 +1032,7 @@ void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDr
 	}
 	for (const FPlanetTerrainNextNodeId& Id : Drawn)
 	{
-		if (!Next.Contains(Id))
+		if (!Render.Contains(Id))
 		{
 			if (const int32* SlotIndex = Resident.Find(Id))
 			{
@@ -841,22 +1043,98 @@ void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDr
 					Slot.Mesh->SetCastShadow(false);
 					Slot.bShown = false;
 					Slot.LodTransition = ELodTransition::Merging;
-					// Freeze reveal so a later re-show does not inherit a mid-reveal from hidden frames.
 					Slot.MorphReveal = 0.0f;
 					Slot.Morph = 1.0f;
+					if (Slot.Material)
+					{
+						Slot.Material->SetScalarParameterValue(TEXT("LodFade"), 0.0f);
+						Slot.Material->SetScalarParameterValue(TEXT("LodFadeRole"), 0.0f);
+						Slot.LastLodFadeParam = 0.0f;
+						Slot.LastLodFadeRoleParam = 0.0f;
+					}
 					++Changes;
 				}
 			}
 		}
 	}
-	Drawn = MoveTemp(Next);
 	FrameStats.VisibilityChanges = Changes;
+}
+
+void UPlanetTerrainNextComponent::ApplyLodFadeParams()
+{
+	TMap<FPlanetTerrainNextNodeId, float> FadeByParent;
+	for (const FPlanetTerrainNextLodFade& Fade : LodFades)
+	{
+		FadeByParent.Add(Fade.Parent, Fade.Progress);
+	}
+
+	for (FSlot& Slot : Slots)
+	{
+		if (!Slot.bInUse || !Slot.bShown || !Slot.Material)
+		{
+			continue;
+		}
+		float Progress = 0.0f;
+		float Role = PlanetTerrainNextLodFade::RoleParent();
+		bool bInFade = false;
+
+		if (const float* ParentProgress = FadeByParent.Find(Slot.Id))
+		{
+			Progress = *ParentProgress;
+			Role = PlanetTerrainNextLodFade::RoleParent();
+			bInFade = true;
+		}
+		else if (Slot.Id.Level > 0)
+		{
+			const FPlanetTerrainNextNodeId Parent(
+				Slot.Id.Face, static_cast<uint8>(Slot.Id.Level - 1), Slot.Id.X >> 1, Slot.Id.Y >> 1);
+			if (const float* ChildProgress = FadeByParent.Find(Parent))
+			{
+				Progress = *ChildProgress;
+				Role = PlanetTerrainNextLodFade::RoleChild();
+				bInFade = true;
+			}
+		}
+
+		if (!bInFade)
+		{
+			// Stable leaf: fully opaque (parent role with fade 0 ⇒ EffectiveAlpha=1).
+			Progress = 0.0f;
+			Role = PlanetTerrainNextLodFade::RoleParent();
+		}
+
+		if (!FMath::IsNearlyEqual(Slot.LastLodFadeParam, Progress, 1.0e-4f))
+		{
+			Slot.Material->SetScalarParameterValue(TEXT("LodFade"), Progress);
+			Slot.LastLodFadeParam = Progress;
+		}
+		if (!FMath::IsNearlyEqual(Slot.LastLodFadeRoleParam, Role, 1.0e-4f))
+		{
+			Slot.Material->SetScalarParameterValue(TEXT("LodFadeRole"), Role);
+			Slot.LastLodFadeRoleParam = Role;
+		}
+
+		// Shadow policy: only the dominant side casts during a fade.
+		if (bInFade)
+		{
+			const bool bDominant = (Role < 0.5f) ? (Progress < 0.5f) : (Progress >= 0.5f);
+			Slot.Mesh->SetCastShadow(Settings.bCastShadow && bDominant);
+		}
+	}
 }
 
 void UPlanetTerrainNextComponent::BeginVisibleHandoff(FSlot& Slot)
 {
-	Slot.Morph = 1.0f;
-	Slot.MorphReveal = 0.0f;
+	if (Settings.bEnableLegacyMorph)
+	{
+		Slot.Morph = 1.0f;
+		Slot.MorphReveal = 0.0f;
+	}
+	else
+	{
+		Slot.Morph = 0.0f;
+		Slot.MorphReveal = 1.0f;
+	}
 	Slot.LodTransition = ELodTransition::Splitting;
 	if (Slot.bCpuMorph)
 	{
@@ -869,10 +1147,17 @@ void UPlanetTerrainNextComponent::BeginVisibleHandoff(FSlot& Slot)
 	}
 	else if (Slot.Material)
 	{
-		Slot.Material->SetScalarParameterValue(TEXT("Morph"), 1.0f);
+		Slot.Material->SetScalarParameterValue(TEXT("Morph"), Settings.bEnableLegacyMorph ? 1.0f : 0.0f);
 		Slot.Material->SetScalarParameterValue(
 			TEXT("MorphScaleCm"),
 			static_cast<float>(FMath::Max(Slot.MaxAbsCoarseDeltaCm, 1.0)));
+	}
+	if (Slot.Material)
+	{
+		Slot.Material->SetScalarParameterValue(TEXT("LodFade"), 0.0f);
+		Slot.Material->SetScalarParameterValue(TEXT("LodFadeRole"), 0.0f);
+		Slot.LastLodFadeParam = 0.0f;
+		Slot.LastLodFadeRoleParam = 0.0f;
 	}
 }
 
@@ -906,6 +1191,7 @@ void UPlanetTerrainNextComponent::RefreshTilePins(const TArray<FPlanetTerrainNex
 
 void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_ApplyMorph);
 	const float Dt = FMath::Max(DeltaSeconds, 0.0f);
 	TMap<FPlanetTerrainNextNodeId, double> PixelErrors;
 	PixelErrors.Reserve(DrawSet.Num());
@@ -938,8 +1224,9 @@ void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDraw
 		}
 
 		float Target = 0.0f;
-		if (!Settings.bMorphEnabled)
+		if (!Settings.bEnableLegacyMorph || !Settings.bMorphEnabled)
 		{
+			// R10.2: dither owns LOD transitions; keep fine geometry (Morph=0).
 			Target = 0.0f;
 			Slot.MorphReveal = 1.0f;
 		}
@@ -967,7 +1254,10 @@ void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDraw
 		}
 
 		float Morph = Target;
-		if (Settings.MorphSmoothSeconds > KINDA_SMALL_NUMBER && Settings.bMorphEnabled && Settings.MorphForce < 0.0f)
+		if (Settings.bEnableLegacyMorph
+			&& Settings.MorphSmoothSeconds > KINDA_SMALL_NUMBER
+			&& Settings.bMorphEnabled
+			&& Settings.MorphForce < 0.0f)
 		{
 			const float Alpha = 1.0f - FMath::Exp(-Dt / Settings.MorphSmoothSeconds);
 			Morph = FMath::Lerp(Slot.Morph, Target, Alpha);
@@ -1014,6 +1304,7 @@ void UPlanetTerrainNextComponent::HideAll()
 	}
 	Drawn.Reset();
 	HandoffHoldFrames.Reset();
+	LodFades.Reset();
 	for (const TPair<FPlanetTerrainNextNodeId, int32>& Pair : CollisionResident)
 	{
 		if (CollisionMeshes.IsValidIndex(Pair.Value) && CollisionMeshes[Pair.Value])
@@ -1335,6 +1626,7 @@ void UPlanetTerrainNextComponent::UpdateCollision(const FPlanetTerrainNextView& 
 
 void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_TickComponent);
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	if (!bInitialized)
 	{
@@ -1358,6 +1650,35 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	}
 
 	const double TickStart = FPlatformTime::Seconds();
+	const double FrameMs = FMath::Max(0.0, static_cast<double>(DeltaTime) * 1000.0);
+	if (FrameTimeMsSamples.Num() < 256)
+	{
+		FrameTimeMsSamples.Add(FrameMs);
+	}
+	else
+	{
+		FrameTimeMsSamples[FrameTimeSampleCursor++ % FrameTimeMsSamples.Num()] = FrameMs;
+	}
+	if (++FrameTimeSortCounter >= 30 && FrameTimeMsSamples.Num() >= 30)
+	{
+		FrameTimeSortCounter = 0;
+		TArray<double> SortedFrameTimes = FrameTimeMsSamples;
+		SortedFrameTimes.Sort();
+		auto Percentile = [&SortedFrameTimes](double P)
+		{
+			return SortedFrameTimes[FMath::Clamp(
+				FMath::CeilToInt(P * SortedFrameTimes.Num()) - 1, 0, SortedFrameTimes.Num() - 1)];
+		};
+		FrameStats.FrameP50Ms = Percentile(0.50);
+		FrameStats.FrameP95Ms = Percentile(0.95);
+		FrameStats.FrameP99Ms = Percentile(0.99);
+	}
+	FrameStats.MeshSectionCreates = 0;
+	FrameStats.MeshSectionUpdates = 0;
+	FrameStats.MeshSectionClears = 0;
+	FrameStats.MeshResourceRebuilds = 0;
+	FrameStats.CpuMorphUploads = 0;
+	FrameStats.CpuMorphUploadMs = 0.0;
 	Settings = FPlanetTerrainNextRuntimeSettings::Read();
 	if (!TileCache.IsValid() || !GpuPool.IsValid() || !Scheduler.IsValid() || !HeightField.IsValid())
 	{
@@ -1401,6 +1722,40 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 			: 0);
 	}
 	Scheduler->SetBudgets(Settings.MaxBakeWorkers, Settings.MaxBakeQueue);
+	FPlanetTerrainNextView View;
+	const bool bHasView = GetView(View);
+	TArray<uint8> FacePriority;
+	FacePriority.Reserve(6);
+	if (bHasView)
+	{
+		const FVector3d CameraDirection = View.CameraM.GetSafeNormal();
+		bool bSelected[6] = {false, false, false, false, false, false};
+		for (int32 OrderIndex = 0; OrderIndex < 6; ++OrderIndex)
+		{
+			int32 BestFace = INDEX_NONE;
+			double BestFacing = -TNumericLimits<double>::Max();
+			for (int32 Face = 0; Face < 6; ++Face)
+			{
+				if (bSelected[Face]) continue;
+				const double Facing = FVector3d::DotProduct(
+					CameraDirection, PlanetTerrainNext::FacePoint(Face, 0.5, 0.5));
+				if (Facing > BestFacing)
+				{
+					BestFacing = Facing;
+					BestFace = Face;
+				}
+			}
+			if (BestFace != INDEX_NONE)
+			{
+				bSelected[BestFace] = true;
+				FacePriority.Add(static_cast<uint8>(BestFace));
+			}
+		}
+	}
+	else
+	{
+		for (uint8 Face = 0; Face < 6; ++Face) FacePriority.Add(Face);
+	}
 	if (DetailStore.IsValid())
 	{
 		DetailStore->SetEnabled(Settings.bDetailProjection);
@@ -1408,7 +1763,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		bool bRefreshDetail = false;
 		if (Settings.bDetailProjection)
 		{
-			DetailStore->Tick(HeightField, this);
+			DetailStore->Tick(HeightField, this, FacePriority);
 			if (DetailAlbedoTextures.Num() < 6)
 			{
 				DetailAlbedoTextures.SetNum(6);
@@ -1437,6 +1792,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		FrameStats.DetailBaking = Settings.bDetailProjection ? DetailStats.Baking : 0;
 		FrameStats.DetailUploads = DetailStats.UploadsThisFrame;
 		FrameStats.DetailBakeP95Ms = DetailStats.P95BakeMs;
+		FrameStats.DetailUploadMs = DetailStats.LastUploadMs;
 	}
 	++FrameCounter;
 	GpuPool->BeginFrame(FrameCounter);
@@ -1444,8 +1800,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	Scheduler->BeginFrame(FrameCounter);
 	RefreshDebugColors();
 
-	FPlanetTerrainNextView View;
-	if (!GetView(View))
+	if (!bHasView)
 	{
 		return;
 	}
@@ -1514,7 +1869,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	TArray<FPlanetTerrainNextDrawItem> DrawSet;
 	Quadtree.CollectDrawSet(IsReady, DrawSet);
 	FrameStats.bDrawCoverageOk = CheckDrawCoverage(DrawSet);
-	ApplyDrawSet(DrawSet);
+	ApplyDrawSet(DrawSet, DeltaTime);
 	const double CollStart = FPlatformTime::Seconds();
 	UpdateCollision(View);
 	FrameStats.CollisionMs = (FPlatformTime::Seconds() - CollStart) * 1000.0;
@@ -1532,6 +1887,11 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	FrameStats.Pending = FMath::Max(0, Pending.Num() - Built);
 	FrameStats.BuiltThisFrame = Built;
 	FrameStats.Slots = Slots.Num();
+	FrameStats.ActiveCpuMorphPatches = 0;
+	for (const FSlot& Slot : Slots)
+	{
+		FrameStats.ActiveCpuMorphPatches += Slot.bInUse && Slot.bCpuMorph ? 1 : 0;
+	}
 	FrameStats.MaxDrawnLevel = 0;
 	FrameStats.DrawnL0 = 0;
 	FrameStats.DrawnL1 = 0;
@@ -1767,14 +2127,23 @@ void UPlanetTerrainNextComponent::PrintStats() const
 		0.0f,
 		HasFullCoverage() ? FColor(140, 230, 140) : FColor::Red,
 		FString::Printf(
-			TEXT("TerrainNext R10 | alt %s | drawn %d L%d (L0:%d L1:%d L2:%d L3+:%d) handoff %d | cov %s | detail %d/6 p%d | disk %d/%d w%d | morph %.2f | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f | tick %.2f ms"),
+			TEXT("TerrainNext R10.3 | alt %s | drawn %d L%d (L0:%d L1:%d L2:%d L3+:%d) fade %d %.2f | cov %s | detail %d/6 p%d | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f tick %.2fms"),
 			*AltitudeText, S.Drawn, S.MaxDrawnLevel,
-			S.DrawnL0, S.DrawnL1, S.DrawnL2, S.DrawnL3Plus, S.HandoffParentsKept,
+			S.DrawnL0, S.DrawnL1, S.DrawnL2, S.DrawnL3Plus, S.ActiveLodFades, S.MeanLodFade,
 			S.bDrawCoverageOk ? TEXT("ok") : TEXT("HOLE"),
 			S.DetailReadyFaces, S.DetailPending,
-			S.DiskHits, S.DiskMisses, S.DiskWrites,
-			S.MeanMorph,
 			S.CollisionResident, S.CollisionDesired,
 			S.TreeMs, S.ScheduleMs, S.MeshBuildMs, S.CollisionMs,
 			S.UpdateMs));
+	GEngine->AddOnScreenDebugMessage(
+		static_cast<uint64>(GetUniqueID()) + 0x7E77A001ull,
+		0.0f,
+		FColor(210, 210, 230),
+		FString::Printf(
+			TEXT("TerrainNext perf | frame P50/P95/P99 %.2f/%.2f/%.2fms | visible patches %d | sections create/update/clear %d/%d/%d rebuilds %d | CPU morph active/uploads/ms %d/%d/%.2f | detail bakeP95/upload ms %.1f/%.1f"),
+			S.FrameP50Ms, S.FrameP95Ms, S.FrameP99Ms, S.Drawn,
+			S.MeshSectionCreates, S.MeshSectionUpdates, S.MeshSectionClears,
+			S.MeshResourceRebuilds,
+			S.ActiveCpuMorphPatches, S.CpuMorphUploads, S.CpuMorphUploadMs,
+			S.DetailBakeP95Ms, S.DetailUploadMs));
 }

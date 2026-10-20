@@ -14,12 +14,15 @@
 #include "Materials/MaterialExpressionComponentMask.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Materials/MaterialExpressionLinearInterpolate.h"
+#include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialExpressionOneMinus.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
 #include "Materials/MaterialExpressionTransform.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialFunction.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
@@ -37,7 +40,7 @@ UMaterialInterface* LoadExisting()
 #if WITH_EDITOR
 UMaterialInterface* CreateAndSave()
 {
-	const FString PackagePath = TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v4");
+	const FString PackagePath = TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v5");
 	UPackage* Package = CreatePackage(*PackagePath);
 	if (!Package)
 	{
@@ -49,7 +52,7 @@ UMaterialInterface* CreateAndSave()
 	UMaterial* Material = Cast<UMaterial>(Factory->FactoryCreateNew(
 		UMaterial::StaticClass(),
 		Package,
-		TEXT("M_PlanetTerrainNextPatch_v4"),
+		TEXT("M_PlanetTerrainNextPatch_v5"),
 		RF_Public | RF_Standalone | RF_Transactional,
 		nullptr,
 		GWarn));
@@ -59,12 +62,12 @@ UMaterialInterface* CreateAndSave()
 		return nullptr;
 	}
 
-	Material->BlendMode = BLEND_Opaque;
+	// R10.2: masked dither (depth writes, no translucency pass).
+	Material->BlendMode = BLEND_Masked;
 	Material->SetShadingModel(MSM_DefaultLit);
 	Material->TwoSided = true;
 	Material->SetMaterialUsage(MATUSAGE_StaticMesh);
 
-	// --- Morph WPO (unchanged contract) ---
 	auto* Morph = Cast<UMaterialExpressionScalarParameter>(
 		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionScalarParameter::StaticClass(), -700, 0));
 	Morph->ParameterName = TEXT("Morph");
@@ -117,7 +120,6 @@ UMaterialInterface* CreateAndSave()
 	ToWorld->TransformType = TRANSFORM_World;
 	ToWorld->Input.Connect(0, TimesScale);
 
-	// --- R9.3 detail projection ---
 	auto* UV0 = Cast<UMaterialExpressionTextureCoordinate>(
 		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionTextureCoordinate::StaticClass(), -700, 400));
 	UV0->CoordinateIndex = 0;
@@ -184,9 +186,54 @@ UMaterialInterface* CreateAndSave()
 	NormalLerp->B.Connect(0, DetailNormal);
 	NormalLerp->Alpha.Connect(0, DetailBlend);
 
+	// --- R10.2 complementary dither ---
+	// EffectiveAlpha = lerp(1 - LodFade, LodFade, LodFadeRole)
+	// OpacityMask = DitherTemporalAA(EffectiveAlpha)
+	auto* LodFade = Cast<UMaterialExpressionScalarParameter>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionScalarParameter::StaticClass(), -700, 720));
+	LodFade->ParameterName = TEXT("LodFade");
+	LodFade->DefaultValue = 0.0f;
+
+	auto* LodFadeRole = Cast<UMaterialExpressionScalarParameter>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionScalarParameter::StaticClass(), -700, 800));
+	LodFadeRole->ParameterName = TEXT("LodFadeRole");
+	LodFadeRole->DefaultValue = 0.0f; // 0=parent/outgoing, 1=child/incoming
+
+	auto* OneMinusFade = Cast<UMaterialExpressionOneMinus>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionOneMinus::StaticClass(), -480, 720));
+	OneMinusFade->Input.Connect(0, LodFade);
+
+	auto* EffectiveAlpha = Cast<UMaterialExpressionLinearInterpolate>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionLinearInterpolate::StaticClass(), -280, 760));
+	EffectiveAlpha->A.Connect(0, OneMinusFade);
+	EffectiveAlpha->B.Connect(0, LodFade);
+	EffectiveAlpha->Alpha.Connect(0, LodFadeRole);
+
+	UMaterialExpression* OpacitySource = EffectiveAlpha;
+	if (UMaterialFunction* DitherFn = LoadObject<UMaterialFunction>(
+			nullptr, TEXT("/Engine/Functions/Engine_MaterialFunctions02/Utility/DitherTemporalAA.DitherTemporalAA")))
+	{
+		auto* DitherCall = Cast<UMaterialExpressionMaterialFunctionCall>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionMaterialFunctionCall::StaticClass(), -80, 760));
+		if (DitherCall && DitherCall->SetMaterialFunction(DitherFn))
+		{
+			DitherCall->UpdateFromFunctionResource();
+			if (DitherCall->FunctionInputs.Num() > 0)
+			{
+				DitherCall->FunctionInputs[0].Input.Connect(0, EffectiveAlpha);
+				OpacitySource = DitherCall;
+			}
+		}
+	}
+	else
+	{
+		UE_LOG(LogPlanetTerrainNext, Warning, TEXT("DitherTemporalAA MF missing — OpacityMask uses raw EffectiveAlpha"));
+	}
+
 	UMaterialEditingLibrary::ConnectMaterialProperty(BaseColor, TEXT(""), MP_BaseColor);
 	UMaterialEditingLibrary::ConnectMaterialProperty(NormalLerp, TEXT(""), MP_Normal);
 	UMaterialEditingLibrary::ConnectMaterialProperty(ToWorld, TEXT(""), MP_WorldPositionOffset);
+	UMaterialEditingLibrary::ConnectMaterialProperty(OpacitySource, TEXT(""), MP_OpacityMask);
 	UMaterialEditingLibrary::LayoutMaterialExpressions(Material);
 	UMaterialEditingLibrary::RecompileMaterial(Material);
 
@@ -227,7 +274,7 @@ UMaterialInterface* GetOrCreate()
 	}
 #endif
 	UE_LOG(LogPlanetTerrainNext, Warning,
-		TEXT("Morph material missing at %s — falling back to BasicShapeMaterial (positions stay fine; Morph/Detail params ignored)."),
+		TEXT("Morph material missing at %s — falling back to BasicShapeMaterial."),
 		Path);
 	return LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
 }

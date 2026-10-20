@@ -178,6 +178,68 @@ bool FPlanetTerrainNextR93DetailBakeDeterminismTest::RunTest(const FString& Para
 	TestEqual(TEXT("normal size"), A.Normal.Num(), 64 * 64);
 	TestTrue(TEXT("albedo identical"), A.Albedo == B.Albedo);
 	TestTrue(TEXT("normal identical"), A.Normal == B.Normal);
+	TestTrue(TEXT("albedo mip chain deterministic"), A.AlbedoMips == B.AlbedoMips);
+	TestTrue(TEXT("normal mip chain deterministic"), A.NormalMips == B.NormalMips);
+	TestEqual(TEXT("full mip chain levels"), A.AlbedoMips.Num(), 6);
+	TestEqual(TEXT("final mip size"), A.AlbedoMips.Last().Num(), 1);
+
+	// Compare cached normals against the pre-cache finite-difference implementation.
+	const double Radius = Field.GetRadiusMeters();
+	const double TexelM = (UE_DOUBLE_PI * 0.5) * Radius / 64.0;
+	const double MinWL = FMath::Max(TexelM * 2.0, 1.0);
+	const double Du = 1.0 / 64.0;
+	const double Dv = Du;
+	constexpr double Eps = 0.45;
+	auto OldPosition = [&Field, Radius, MinWL](double U, double V)
+	{
+		const FVector3d Dir = PlanetTerrainNext::FacePoint(0, U, V);
+		return Dir * (Radius + Field.HeightAt(Dir, MinWL));
+	};
+	int32 MaxNormalChannelDelta = 0;
+	int64 SumNormalChannelDelta = 0;
+	int32 ComparedChannels = 0;
+	for (int32 J = 4; J < 64; J += 8)
+	{
+		for (int32 I = 4; I < 64; I += 8)
+		{
+			const double U = (I + 0.5) * Du;
+			const double V = (J + 0.5) * Dv;
+			const FVector3d Dir = PlanetTerrainNext::FacePoint(0, U, V);
+			const FVector3d Pu = OldPosition(U + Eps * Du, V) - OldPosition(U - Eps * Du, V);
+			const FVector3d Pv = OldPosition(U, V + Eps * Dv) - OldPosition(U, V - Eps * Dv);
+			FVector3d N = FVector3d::CrossProduct(Pu, Pv).GetSafeNormal();
+			if (N.IsNearlyZero() || FVector3d::DotProduct(N, Dir) < 0.0)
+			{
+				N = Dir;
+			}
+			FVector3d T = Pu.GetSafeNormal();
+			FVector3d Bitangent = FVector3d::CrossProduct(Dir, T).GetSafeNormal();
+			T = FVector3d::CrossProduct(Bitangent, Dir).GetSafeNormal();
+			const FVector3d NTangent(
+				FVector3d::DotProduct(N, T),
+				FVector3d::DotProduct(N, Bitangent),
+				FVector3d::DotProduct(N, Dir));
+			const FVector3d Enc = NTangent.GetSafeNormal();
+			const FColor Reference = FLinearColor(
+				static_cast<float>(Enc.X * 0.5 + 0.5),
+				static_cast<float>(Enc.Y * 0.5 + 0.5),
+				static_cast<float>(Enc.Z * 0.5 + 0.5), 1.0f).ToFColor(false);
+			const FColor Cached = A.Normal[J * 64 + I];
+			const uint8 ReferenceChannels[3] = {Reference.R, Reference.G, Reference.B};
+			const uint8 CachedChannels[3] = {Cached.R, Cached.G, Cached.B};
+			for (int32 Channel = 0; Channel < 3; ++Channel)
+			{
+				const int32 Delta = FMath::Abs(static_cast<int32>(ReferenceChannels[Channel]) - static_cast<int32>(CachedChannels[Channel]));
+				MaxNormalChannelDelta = FMath::Max(MaxNormalChannelDelta, Delta);
+				SumNormalChannelDelta += Delta;
+				++ComparedChannels;
+			}
+		}
+	}
+	const double MeanNormalChannelDelta = static_cast<double>(SumNormalChannelDelta) / ComparedChannels;
+	AddInfo(FString::Printf(TEXT("Cached normal comparison: max channel delta %d/255, mean %.3f/255 over %d channels"),
+		MaxNormalChannelDelta, MeanNormalChannelDelta, ComparedChannels));
+	TestTrue(TEXT("cached normals stay close to prior finite differences"), MaxNormalChannelDelta <= 16);
 
 	int32 NonFlatNormals = 0;
 	int32 AlbedoVariance = 0;

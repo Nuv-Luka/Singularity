@@ -8,6 +8,7 @@
 #include "PlanetTerrainNextDiskTileStore.h"
 #include "PlanetTerrainNextGpuSlotPool.h"
 #include "PlanetTerrainNextHeightField.h"
+#include "PlanetTerrainNextLodFade.h"
 #include "PlanetTerrainNextQuadtree.h"
 #include "PlanetTerrainNextSettings.h"
 #include "PlanetTerrainNextTileCache.h"
@@ -45,6 +46,13 @@ struct FPlanetTerrainNextFrameStats
 	bool bDrawCoverageOk = true;
 	int32 Slots = 0;
 	int32 MorphUniformUpdates = 0;
+	int32 MeshSectionCreates = 0;
+	int32 MeshSectionUpdates = 0;
+	int32 MeshSectionClears = 0;
+	int32 MeshResourceRebuilds = 0;
+	int32 ActiveCpuMorphPatches = 0;
+	int32 CpuMorphUploads = 0;
+	double CpuMorphUploadMs = 0.0;
 	int32 TileCacheHits = 0;
 	int32 TileCacheMisses = 0;
 	int32 TileBakes = 0;
@@ -74,6 +82,9 @@ struct FPlanetTerrainNextFrameStats
 	double MeshBuildMs = 0.0;
 	double CollisionMs = 0.0;
 	double UpdateMs = 0.0;
+	double FrameP50Ms = 0.0;
+	double FrameP95Ms = 0.0;
+	double FrameP99Ms = 0.0;
 	double AltitudeM = 0.0;
 	float MeanMorph = 0.0f;
 	/** R9.3 detail projection */
@@ -82,11 +93,15 @@ struct FPlanetTerrainNextFrameStats
 	int32 DetailBaking = 0;
 	int32 DetailUploads = 0;
 	double DetailBakeP95Ms = 0.0;
+	double DetailUploadMs = 0.0;
 	/** R10.1 diagnostic */
 	bool bDiagActive = false;
 	int32 DiagPatches = 0;
 	int32 DiagInvalidTris = 0;
 	int32 DiagInwardFacing = 0;
+	/** R10.2 dither fades */
+	int32 ActiveLodFades = 0;
+	float MeanLodFade = 0.0f;
 };
 
 /**
@@ -169,8 +184,8 @@ private:
 		ELodTransition LodTransition = ELodTransition::Stable;
 		double MaxAbsCoarseDeltaCm = 0.0;
 		/**
-		 * L0/L1: bake morph into vertex positions (WPO UVs cannot be trusted at face scale).
-		 * Fine/Coarse kept so ApplyMorph can UpdateMeshSection without rebuild.
+		 * Optional legacy CPU morph path: bake morph into positions where WPO UVs are unsafe.
+		 * Fine/Coarse arrays are kept only while that path is enabled.
 		 */
 		bool bCpuMorph = false;
 		TArray<FVector> FineCm;
@@ -185,6 +200,10 @@ private:
 		bool bShown = false;
 		/** Matches PlanetTerrainNextPatch::GetIndexBufferVersion() at last Create. */
 		int32 IndexBufferVersion = -1;
+		int32 SectionVertexCount = 0;
+		int32 SectionIndexCount = 0;
+		float LastLodFadeParam = -1.0f;
+		float LastLodFadeRoleParam = -1.0f;
 	};
 
 	FPlanetTerrainNextTileId MakeTileId(const FPlanetTerrainNextNodeId& Id) const;
@@ -196,14 +215,19 @@ private:
 	void UploadPatch(FSlot& Slot, const FPlanetTerrainNextPatchData& Patch);
 	void UploadCpuMorphedSection(FSlot& Slot);
 	/** bAllowForceFresh: true on BuildNode upload; false on per-frame morph Update. */
-	bool ShouldRecreateSection(const FSlot& Slot, bool bAllowForceFresh) const;
+	bool ShouldRecreateSection(const FSlot& Slot, bool bAllowForceFresh, int32 VertexCount, int32 IndexCount) const;
 	void TickDiagnostic(float DeltaSeconds);
 	void ApplySuspendedProxyVisibility(bool bShowProxy);
-	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
+	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds);
+	void ApplyDrawSetExclusive(TSet<FPlanetTerrainNextNodeId>& Next);
+	void ApplyDrawSetDithered(const TSet<FPlanetTerrainNextNodeId>& Desired, float DeltaSeconds);
+	void SyncVisibilityToRenderSet(const TSet<FPlanetTerrainNextNodeId>& Render);
+	void ApplyLodFadeParams();
 	bool CheckDrawCoverage(const TArray<FPlanetTerrainNextDrawItem>& DrawSet) const;
 	/** Morph only patches that are actually shown after handoff (R9.2). */
 	void ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds);
 	void BeginVisibleHandoff(FSlot& Slot);
+	int32 FindLodFadeIndex(const FPlanetTerrainNextNodeId& Parent) const;
 	void RefreshTilePins(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
 	void UpdateCollision(const FPlanetTerrainNextView& View);
 	bool CookCollisionNode(const FPlanetTerrainNextNodeId& Id);
@@ -255,11 +279,16 @@ private:
 	TSet<FPlanetTerrainNextNodeId> Drawn;
 	/** Parents held N frames so children replace them without co-drawing / hard pops. */
 	TMap<FPlanetTerrainNextNodeId, int32> HandoffHoldFrames;
+	/** R10.2: active dither fade groups (sibling Progress shared). */
+	TArray<FPlanetTerrainNextLodFade> LodFades;
 	TMap<FPlanetTerrainNextNodeId, int32> CollisionResident;
 	TArray<int32> FreeCollisionSlots;
 
 	TArray<double> BuildTimesMs;
 	int32 BuildTimeCursor = 0;
+	TArray<double> FrameTimeMsSamples;
+	int32 FrameTimeSampleCursor = 0;
+	int32 FrameTimeSortCounter = 0;
 	FPlanetTerrainNextFrameStats FrameStats;
 	EPlanetTerrainNextDebugColor AppliedDebugColor = EPlanetTerrainNextDebugColor::Regolith;
 	bool bInitialized = false;

@@ -295,6 +295,18 @@ void SPlanetTerrainNextSpawnPanel::Construct(const FArguments& InArgs)
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 						[
+							MakeCVarCheckRow(TEXT("Dithered LOD"), TEXT("singularity.TerrainNext.EnableDitheredLOD"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarCheckRow(TEXT("Legacy morph"), TEXT("singularity.TerrainNext.EnableLegacyMorph"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarFloatRow(TEXT("LOD fade (s)"), TEXT("singularity.TerrainNext.LodTransitionSeconds"), 0.05f, 2.0f)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
 							MakeCVarCheckRow(TEXT("Pause builds"), TEXT("singularity.TerrainNext.PauseBuilds"))
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)

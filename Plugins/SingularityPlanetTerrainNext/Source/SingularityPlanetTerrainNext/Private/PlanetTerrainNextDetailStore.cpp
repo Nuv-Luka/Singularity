@@ -4,6 +4,7 @@
 #include "Async/Async.h"
 #include "Engine/Texture2D.h"
 #include "HAL/PlatformTime.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 namespace
 {
@@ -12,6 +13,7 @@ UTexture2D* CreateDetailTexture(
 	FName Name,
 	int32 Res,
 	const TArray<FColor>& Pixels,
+	const TArray<TArray<FColor>>& MipPixels,
 	bool bSRGB,
 	TextureCompressionSettings Compression)
 {
@@ -32,13 +34,26 @@ UTexture2D* CreateDetailTexture(
 	Tex->AddressX = TA_Clamp;
 	Tex->AddressY = TA_Clamp;
 	Tex->CompressionSettings = Compression;
-	Tex->MipGenSettings = TMGS_NoMipmaps;
+	Tex->MipGenSettings = TMGS_LeaveExistingMips;
 	Tex->NeverStream = true;
 
 	FTexture2DMipMap& Mip = Tex->GetPlatformData()->Mips[0];
 	void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
 	FMemory::Memcpy(Data, Pixels.GetData(), Pixels.Num() * sizeof(FColor));
 	Mip.BulkData.Unlock();
+	int32 MipSize = Res;
+	for (const TArray<FColor>& PixelsForMip : MipPixels)
+	{
+		MipSize = FMath::Max(1, MipSize / 2);
+		FTexture2DMipMap* NextMip = new FTexture2DMipMap();
+		NextMip->SizeX = MipSize;
+		NextMip->SizeY = MipSize;
+		Tex->GetPlatformData()->Mips.Add(NextMip);
+		void* MipData = NextMip->BulkData.Lock(LOCK_READ_WRITE);
+		MipData = NextMip->BulkData.Realloc(PixelsForMip.Num() * sizeof(FColor));
+		FMemory::Memcpy(MipData, PixelsForMip.GetData(), PixelsForMip.Num() * sizeof(FColor));
+		NextMip->BulkData.Unlock();
+	}
 	Tex->UpdateResource();
 	return Tex;
 }
@@ -197,6 +212,7 @@ void FPlanetTerrainNextDetailStore::StartBake(
 
 bool FPlanetTerrainNextDetailStore::UploadFace(int32 Face, UObject* TextureOuter)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_DetailTextureUpload);
 	if (Face < 0 || Face >= 6 || !TextureOuter)
 	{
 		return false;
@@ -215,9 +231,9 @@ bool FPlanetTerrainNextDetailStore::UploadFace(int32 Face, UObject* TextureOuter
 	const FName NormalName(*FString::Printf(TEXT("PTN_DetailNormal_F%d"), Face));
 
 	Slot.Albedo = CreateDetailTexture(
-		TextureOuter, AlbedoName, Res, Slot.CpuTile->Albedo, true, TC_Default);
+		TextureOuter, AlbedoName, Res, Slot.CpuTile->Albedo, Slot.CpuTile->AlbedoMips, true, TC_Default);
 	Slot.Normal = CreateDetailTexture(
-		TextureOuter, NormalName, Res, Slot.CpuTile->Normal, false, TC_Normalmap);
+		TextureOuter, NormalName, Res, Slot.CpuTile->Normal, Slot.CpuTile->NormalMips, false, TC_Normalmap);
 
 	Stats.LastUploadMs = (FPlatformTime::Seconds() - Start) * 1000.0;
 	Slot.CpuTile.Reset();
@@ -238,7 +254,8 @@ bool FPlanetTerrainNextDetailStore::UploadFace(int32 Face, UObject* TextureOuter
 
 bool FPlanetTerrainNextDetailStore::Tick(
 	const TSharedPtr<FPlanetTerrainNextHeightField, ESPMode::ThreadSafe>& HeightField,
-	UObject* TextureOuter)
+	UObject* TextureOuter,
+	const TArray<uint8>& FacePriority)
 {
 	Stats.CompletedThisFrame = 0;
 	Stats.UploadsThisFrame = 0;
@@ -281,8 +298,10 @@ bool FPlanetTerrainNextDetailStore::Tick(
 			++InFlight;
 		}
 	}
-	for (int32 Face = 0; Face < 6 && InFlight < MaxConcurrentBakes; ++Face)
+	for (int32 Priority = 0; Priority < 6 && InFlight < MaxConcurrentBakes; ++Priority)
 	{
+		const int32 Face = FacePriority.IsValidIndex(Priority) ? FacePriority[Priority] : Priority;
+		if (Face < 0 || Face >= 6) continue;
 		if (Faces[Face].State == EFaceState::Queued)
 		{
 			StartBake(Face, HeightField);
@@ -290,8 +309,10 @@ bool FPlanetTerrainNextDetailStore::Tick(
 		}
 	}
 
-	for (int32 Face = 0; Face < 6 && Stats.UploadsThisFrame < UploadsPerFrame; ++Face)
+	for (int32 Priority = 0; Priority < 6 && Stats.UploadsThisFrame < UploadsPerFrame; ++Priority)
 	{
+		const int32 Face = FacePriority.IsValidIndex(Priority) ? FacePriority[Priority] : Priority;
+		if (Face < 0 || Face >= 6) continue;
 		if (Faces[Face].State == EFaceState::ReadyCpu)
 		{
 			if (UploadFace(Face, TextureOuter))

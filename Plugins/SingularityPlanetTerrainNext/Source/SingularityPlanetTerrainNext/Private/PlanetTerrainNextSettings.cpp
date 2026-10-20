@@ -186,8 +186,28 @@ TAutoConsoleVariable<int32> CVarDetailUploadsPerFrame(
 
 TAutoConsoleVariable<bool> CVarForceFreshMeshSection(
 	TEXT("singularity.TerrainNext.ForceFreshMeshSection"),
+	false,
+	TEXT("Diagnostic: force Clear+Create PMC sections on node upload."));
+
+TAutoConsoleVariable<bool> CVarEnableDitheredLOD(
+	TEXT("singularity.TerrainNext.EnableDitheredLOD"),
 	true,
-	TEXT("R10.1: Clear+Create PMC sections on upload (UpdateMeshSection never rewrites indices)."));
+	TEXT("R10.2: complementary dithered parent/child LOD crossfade (masked material)."));
+
+TAutoConsoleVariable<bool> CVarEnableLegacyMorph(
+	TEXT("singularity.TerrainNext.EnableLegacyMorph"),
+	false,
+	TEXT("R10.2: enable PE/WPO/CPU morph path (off = Morph forced to 0)."));
+
+TAutoConsoleVariable<float> CVarLodTransitionSeconds(
+	TEXT("singularity.TerrainNext.LodTransitionSeconds"),
+	0.45f,
+	TEXT("R10.2: sibling-group dither fade duration in seconds."));
+
+TAutoConsoleVariable<int32> CVarMaxConcurrentTransitionGroups(
+	TEXT("singularity.TerrainNext.MaxConcurrentTransitionGroups"),
+	24,
+	TEXT("R10.2: max simultaneous dither fade groups (excess use exclusive handoff)."));
 } // namespace
 
 FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
@@ -231,6 +251,10 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.DetailMaxConcurrentBakes = FMath::Clamp(CVarDetailMaxConcurrentBakes.GetValueOnGameThread(), 1, 6);
 	Out.DetailUploadsPerFrame = FMath::Clamp(CVarDetailUploadsPerFrame.GetValueOnGameThread(), 0, 6);
 	Out.bForceFreshMeshSection = CVarForceFreshMeshSection.GetValueOnGameThread();
+	Out.bEnableDitheredLOD = CVarEnableDitheredLOD.GetValueOnGameThread();
+	Out.bEnableLegacyMorph = CVarEnableLegacyMorph.GetValueOnGameThread();
+	Out.LodTransitionSeconds = FMath::Clamp(CVarLodTransitionSeconds.GetValueOnGameThread(), 0.05f, 5.0f);
+	Out.MaxConcurrentTransitionGroups = FMath::Clamp(CVarMaxConcurrentTransitionGroups.GetValueOnGameThread(), 1, 128);
 	return Out;
 }
 

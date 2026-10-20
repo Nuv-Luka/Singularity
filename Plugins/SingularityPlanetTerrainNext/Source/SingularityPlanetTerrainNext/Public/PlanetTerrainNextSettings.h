@@ -80,11 +80,17 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	int32 DetailMaxConcurrentBakes = 2;
 	/** GPU detail texture uploads per frame. */
 	int32 DetailUploadsPerFrame = 1;
-	/**
-	 * R10.1: recreate PMC sections on every upload (Clear+Create) instead of UpdateMeshSection.
-	 * Default true — UpdateMeshSection never rewrites indices; pooled slots must not keep a stale index buffer.
-	 */
-	bool bForceFreshMeshSection = true;
+	/** Diagnostic switch; compatible topology is reused by default. */
+	bool bForceFreshMeshSection = false;
+
+	/** R10.2: complementary dithered parent/child LOD crossfade (masked). */
+	bool bEnableDitheredLOD = true;
+	/** R10.2: keep PE/WPO/CPU morph path. Off = Morph forced to 0 (fine surface). */
+	bool bEnableLegacyMorph = false;
+	/** Seconds for a sibling-group fade (Progress 0→1). */
+	float LodTransitionSeconds = 0.45f;
+	/** Cap concurrent fade groups; excess splits fall back to exclusive handoff. */
+	int32 MaxConcurrentTransitionGroups = 24;
 
 	static FPlanetTerrainNextRuntimeSettings Read();
 };

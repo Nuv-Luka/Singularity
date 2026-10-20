@@ -5,29 +5,21 @@
 class UMaterialInterface;
 
 /**
- * Loads (or, in editor, creates) the R9.3 morph + detail material (versioned asset).
+ * Loads (or, in editor, creates) the terrain patch material (versioned asset).
  *
- * Vertex inputs from ProceduralMesh:
- *   Position = fine (cm, patch-local)
- *   UV0 = patch UV [0,1]
- *   UV1.xy + UV2.x = normalized (Coarse - Fine) / MorphScaleCm
- *   VertexColor.rgb = coarse normal * 0.5 + 0.5
+ * R10.2 (v5): MASKED + complementary LodFade dither (Cesium-style).
+ *   LodFade 0→1 shared progress; LodFadeRole 0=parent (1-T), 1=child (T).
+ *   OpacityMask = DitherTemporalAA(EffectiveAlpha).
  *
- * Scalar Morph: 0 = fine, 1 = parent-compatible coarse.
- * Scalar MorphScaleCm: max |Coarse-Fine| in cm (MID per patch).
- * Vector Color: fallback albedo (debug / pre-detail).
- * DetailAlbedo / DetailNormal: root-face (or ancestor) textures.
- * DetailUVOffset.xy + DetailUVScale: FaceUV = PatchUV * Scale + Offset.
- * DetailBlend: 0 = Color only, 1 = detail maps.
- * WPO = TransformLocalVectorToWorld(NormDelta * Morph * MorphScaleCm).
+ * Legacy morph WPO still present (gated by EnableLegacyMorph at runtime).
+ * Detail projection params unchanged from v4.
  */
 namespace PlanetTerrainNextMorphMaterial
 {
-/** Bump when graph contract changes so GetOrCreate does not reuse a stale asset. */
-inline constexpr int32 MaterialFormatVersion = 4;
+inline constexpr int32 MaterialFormatVersion = 5;
 
 inline constexpr TCHAR Path[] =
-	TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v4.M_PlanetTerrainNextPatch_v4");
+	TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v5.M_PlanetTerrainNextPatch_v5");
 
 SINGULARITYPLANETTERRAINNEXT_API UMaterialInterface* GetOrCreate();
 }

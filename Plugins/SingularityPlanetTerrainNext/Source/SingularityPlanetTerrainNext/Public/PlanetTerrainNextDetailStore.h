@@ -44,7 +44,8 @@ public:
 	 */
 	bool Tick(
 		const TSharedPtr<FPlanetTerrainNextHeightField, ESPMode::ThreadSafe>& HeightField,
-		UObject* TextureOuter);
+		UObject* TextureOuter,
+		const TArray<uint8>& FacePriority);
 
 	UTexture2D* GetAlbedo(uint8 Face) const;
 	UTexture2D* GetNormal(uint8 Face) const;

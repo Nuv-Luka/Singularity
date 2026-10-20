@@ -51,6 +51,9 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextDetailTile
 	TArray<FColor> Albedo;
 	/** RGBA8 tangent-space normal (RGB = n*0.5+0.5), Resolution². */
 	TArray<FColor> Normal;
+	/** Generated deterministically on the bake worker; base level is in Albedo/Normal. */
+	TArray<TArray<FColor>> AlbedoMips;
+	TArray<TArray<FColor>> NormalMips;
 	bool bValid = false;
 };
 

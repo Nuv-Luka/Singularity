@@ -2,6 +2,7 @@
 
 #include "PlanetTerrainNextCoordinates.h"
 #include "PlanetTerrainNextHeightField.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 FPlanetTerrainNextDetailTileId FPlanetTerrainNextDetailTileId::MakeRoot(
 	int64 PlanetId,
@@ -38,6 +39,68 @@ FLinearColor AlbedoFromTerrain(
 	const float Cool = FMath::Clamp(Grey - 0.03f * Bowl, 0.08f, 0.7f);
 	return FLinearColor(Grey * 1.02f, Grey, Cool, 1.0f);
 }
+
+void BuildMipChain(const TArray<FColor>& Base, int32 Resolution, bool bNormal, TArray<TArray<FColor>>& OutMips)
+{
+	OutMips.Reset();
+	TArray<FColor> Previous = Base;
+	int32 PreviousSize = Resolution;
+	while (PreviousSize > 1)
+	{
+		const int32 Size = FMath::Max(1, PreviousSize / 2);
+		TArray<FColor>& Mip = OutMips.AddDefaulted_GetRef();
+		Mip.SetNumUninitialized(Size * Size);
+		for (int32 Y = 0; Y < Size; ++Y)
+		{
+			for (int32 X = 0; X < Size; ++X)
+			{
+				const int32 X0 = FMath::Min(X * 2, PreviousSize - 1);
+				const int32 X1 = FMath::Min(X0 + 1, PreviousSize - 1);
+				const int32 Y0 = FMath::Min(Y * 2, PreviousSize - 1);
+				const int32 Y1 = FMath::Min(Y0 + 1, PreviousSize - 1);
+				const FColor Samples[4] = {
+					Previous[Y0 * PreviousSize + X0], Previous[Y0 * PreviousSize + X1],
+					Previous[Y1 * PreviousSize + X0], Previous[Y1 * PreviousSize + X1]};
+				FColor Result;
+				if (bNormal)
+				{
+					FVector3f N = FVector3f::ZeroVector;
+					uint32 Alpha = 0;
+					for (const FColor& Sample : Samples)
+					{
+						N += FVector3f(Sample.R / 127.5f - 1.0f, Sample.G / 127.5f - 1.0f, Sample.B / 127.5f - 1.0f);
+						Alpha += Sample.A;
+					}
+					if (!N.Normalize())
+					{
+						N = FVector3f(0.0f, 0.0f, 1.0f);
+					}
+					Result = FColor(
+						static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((N.X * 0.5f + 0.5f) * 255.0f), 0, 255)),
+						static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((N.Y * 0.5f + 0.5f) * 255.0f), 0, 255)),
+						static_cast<uint8>(FMath::Clamp(FMath::RoundToInt((N.Z * 0.5f + 0.5f) * 255.0f), 0, 255)),
+						static_cast<uint8>(Alpha / 4));
+				}
+				else
+				{
+					FLinearColor C = FLinearColor::Black;
+					uint32 Alpha = 0;
+					for (const FColor& Sample : Samples)
+					{
+						C += FLinearColor(Sample);
+						Alpha += Sample.A;
+					}
+					C /= 4.0f;
+					Result = C.ToFColor(true);
+					Result.A = static_cast<uint8>(Alpha / 4);
+				}
+				Mip[Y * Size + X] = Result;
+			}
+		}
+		Previous = Mip;
+		PreviousSize = Size;
+	}
+}
 } // namespace
 
 void Bake(
@@ -45,6 +108,7 @@ void Bake(
 	const FPlanetTerrainNextDetailTileId& Id,
 	FPlanetTerrainNextDetailTile& Out)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_DetailTileBake);
 	Out = FPlanetTerrainNextDetailTile();
 	Out.Id = Id;
 	const int32 Res = FMath::Clamp(static_cast<int32>(Id.Resolution), 8, 2048);
@@ -63,15 +127,46 @@ void Bake(
 	const double Dv = (V1 - V0) / static_cast<double>(Res);
 	constexpr double Eps = 0.45; // fraction of a texel for finite differences
 
+	// Cache center heights plus a one-texel border. Finite-difference samples retain
+	// the previous ±0.45-texel offsets and bilinearly sample this deterministic cache.
+	const int32 SampleStride = Res + 2;
+	TArray<double> HeightSamples;
+	HeightSamples.SetNumUninitialized(SampleStride * SampleStride);
+	for (int32 J = -1; J <= Res; ++J)
+	{
+		for (int32 I = -1; I <= Res; ++I)
+		{
+			const double U = U0 + (static_cast<double>(I) + 0.5) * Du;
+			const double V = V0 + (static_cast<double>(J) + 0.5) * Dv;
+			const FVector3d Dir = PlanetTerrainNext::FacePoint(Id.Face, U, V);
+			HeightSamples[(J + 1) * SampleStride + (I + 1)] = HeightField.HeightAt(Dir, MinWL);
+		}
+	}
+
+	auto CachedHeight = [&HeightSamples, SampleStride, Res](double X, double Y)
+	{
+		const double CX = FMath::Clamp(X, 0.0, static_cast<double>(Res + 1));
+		const double CY = FMath::Clamp(Y, 0.0, static_cast<double>(Res + 1));
+		const int32 X0 = FMath::FloorToInt(CX);
+		const int32 Y0 = FMath::FloorToInt(CY);
+		const int32 X1 = FMath::Min(X0 + 1, Res + 1);
+		const int32 Y1 = FMath::Min(Y0 + 1, Res + 1);
+		const double TX = CX - X0;
+		const double TY = CY - Y0;
+		const double A = FMath::Lerp(HeightSamples[Y0 * SampleStride + X0], HeightSamples[Y0 * SampleStride + X1], TX);
+		const double B = FMath::Lerp(HeightSamples[Y1 * SampleStride + X0], HeightSamples[Y1 * SampleStride + X1], TX);
+		return FMath::Lerp(A, B, TY);
+	};
+	auto CachedPosition = [&](double SampleX, double SampleY)
+	{
+		const double U = U0 + (SampleX - 0.5) * Du;
+		const double V = V0 + (SampleY - 0.5) * Dv;
+		const FVector3d Dir = PlanetTerrainNext::FacePoint(Id.Face, U, V);
+		return Dir * (Radius + CachedHeight(SampleX, SampleY));
+	};
+
 	Out.Albedo.SetNumUninitialized(Res * Res);
 	Out.Normal.SetNumUninitialized(Res * Res);
-
-	auto Position = [&](double U, double V) -> FVector3d
-	{
-		const FVector3d Dir = PlanetTerrainNext::FacePoint(Id.Face, U, V);
-		const double H = HeightField.HeightAt(Dir, MinWL);
-		return Dir * (Radius + H);
-	};
 
 	for (int32 J = 0; J < Res; ++J)
 	{
@@ -84,8 +179,10 @@ void Bake(
 			const double H = Comp.Total();
 			const FVector3d P = Dir * (Radius + H);
 
-			const FVector3d Pu = Position(U + Eps * Du, V) - Position(U - Eps * Du, V);
-			const FVector3d Pv = Position(U, V + Eps * Dv) - Position(U, V - Eps * Dv);
+			const double SampleX = static_cast<double>(I + 1);
+			const double SampleY = static_cast<double>(J + 1);
+			const FVector3d Pu = CachedPosition(SampleX + Eps, SampleY) - CachedPosition(SampleX - Eps, SampleY);
+			const FVector3d Pv = CachedPosition(SampleX, SampleY + Eps) - CachedPosition(SampleX, SampleY - Eps);
 			FVector3d NDetail = FVector3d::CrossProduct(Pu, Pv).GetSafeNormal();
 			if (NDetail.IsNearlyZero() || FVector3d::DotProduct(NDetail, Dir) < 0.0)
 			{
@@ -121,5 +218,10 @@ void Bake(
 	}
 
 	Out.bValid = Out.Albedo.Num() == Res * Res && Out.Normal.Num() == Res * Res;
+	if (Out.bValid)
+	{
+		BuildMipChain(Out.Albedo, Res, false, Out.AlbedoMips);
+		BuildMipChain(Out.Normal, Res, true, Out.NormalMips);
+	}
 }
 }

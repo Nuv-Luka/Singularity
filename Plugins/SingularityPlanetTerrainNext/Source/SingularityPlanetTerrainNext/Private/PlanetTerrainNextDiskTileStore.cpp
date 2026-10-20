@@ -164,6 +164,14 @@ bool FPlanetTerrainNextDiskTileStore::TryLoad(const FPlanetTerrainNextTileId& Id
 	}
 
 	const FString Path = FilePathFor(Id);
+	// Cache misses are normal while the camera enters new terrain. Check first so
+	// FFileHelper does not emit a warning for every expected miss; the warning
+	// stream was dominating editor CPU and log I/O during continuous descent.
+	if (!IFileManager::Get().FileExists(*Path))
+	{
+		++Stats.LoadMisses;
+		return false;
+	}
 	TArray<uint8> Bytes;
 	if (!FFileHelper::LoadFileToArray(Bytes, *Path) || Bytes.Num() < 64)
 	{
