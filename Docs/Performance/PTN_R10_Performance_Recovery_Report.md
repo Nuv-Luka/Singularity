@@ -32,6 +32,12 @@ Use a new scenario label for every run. Keep `stat unit`, `stat gpu`, `stat rhi`
 
 The previous live process sample was diagnostic context only: 5.6–8.2 CPU seconds per 5-second interval, approximately 3.36 GB working set, and zero missing disk-tile warnings after the `FileExists` guard. It did not contain Game/Draw/RHI/GPU frame-time distributions and is not used as a recovery claim.
 
+### Preliminary candidate capture [MEASURED LOCALLY]
+
+The first live telemetry file was successfully written to `Saved/Logs/PlanetTerrainNextPerf.csv`. It contains one partial stationary sample, `S0_OrbitalStationary_Run1`, with 457 rows (about 7.6 seconds at one sample per frame). The observed frame-delta distribution was median **22.781 ms** (about **43.9 FPS**), P95 **400 ms**, and P99 **400 ms**. There were **83 frames at or above 100 ms**, so this short run contains severe hitching and is not sufficient to characterize steady-state performance. The sample reported 6 drawn/resident patches, 0 mesh creations, 0 mesh updates, 0 active CPU-morph patches, 0 detail uploads, and 0 detail-bake activity during the captured window.
+
+This is candidate-only evidence. It does not provide the required Game/Draw/RHI/GPU stat distributions, does not cover approach/descent/traversal/ascent, and is not an A/B recovery claim. Repeat each scenario for a 30–60 second steady window and capture the matching baseline before assigning a regression cause.
+
 The current renderer has VSM enabled, masked/two-sided v5 transition material, opaque v4 asset, dithered LOD enabled, legacy CPU morph disabled, and topology-compatible PMC reuse enabled by default. See `PTN_R10_Regression_Inventory.md` for the complete source inventory.
 
 ## Safeguard validation after telemetry change
