@@ -1,5 +1,6 @@
 #include "PlanetTerrainNextTileCache.h"
 
+#include "PlanetTerrainNextDiskTileStore.h"
 #include "PlanetTerrainNextHeightField.h"
 #include "HAL/PlatformTime.h"
 
@@ -26,6 +27,13 @@ void FPlanetTerrainNextTileCache::BeginFrame()
 	Stats.Hits = 0;
 	Stats.Misses = 0;
 	Stats.Evictions = 0;
+	Stats.DiskHits = 0;
+	Stats.DiskMisses = 0;
+	Stats.DiskWrites = 0;
+	if (Disk.IsValid())
+	{
+		Disk->BeginFrame();
+	}
 }
 
 const FPlanetTerrainNextHeightTile* FPlanetTerrainNextTileCache::Find(const FPlanetTerrainNextTileId& Id) const
@@ -104,6 +112,18 @@ void FPlanetTerrainNextTileCache::RecordBakeTime(double Ms)
 	Stats.P95BakeMs = Sorted[FMath::Clamp(FMath::CeilToInt(0.95 * Sorted.Num()) - 1, 0, Sorted.Num() - 1)];
 }
 
+void FPlanetTerrainNextTileCache::WriteThroughDisk(const FPlanetTerrainNextHeightTile& Tile)
+{
+	if (!Disk.IsValid() || !Disk->IsEnabled())
+	{
+		return;
+	}
+	if (Disk->Save(Tile))
+	{
+		++Stats.DiskWrites;
+	}
+}
+
 const FPlanetTerrainNextHeightTile* FPlanetTerrainNextTileCache::GetOrBake(
 	const FPlanetTerrainNextHeightField& HeightField,
 	const FPlanetTerrainNextTileId& Id,
@@ -133,10 +153,24 @@ const FPlanetTerrainNextHeightTile* FPlanetTerrainNextTileCache::GetOrBake(
 
 	FEntry Entry;
 	Entry.LastUsedFrame = Frame;
+
+	if (Disk.IsValid() && Disk->IsEnabled())
+	{
+		if (Disk->TryLoad(Id, Entry.Tile))
+		{
+			++Stats.DiskHits;
+			FEntry& Stored = Entries.Add(Id, MoveTemp(Entry));
+			Stats.Entries = Entries.Num();
+			return &Stored.Tile;
+		}
+		++Stats.DiskMisses;
+	}
+
 	const double Start = FPlatformTime::Seconds();
 	PlanetTerrainNextHeightTile::Bake(HeightField, Id, Entry.Tile);
 	RecordBakeTime((FPlatformTime::Seconds() - Start) * 1000.0);
 	++Stats.BakesThisFrame;
+	WriteThroughDisk(Entry.Tile);
 
 	FEntry& Stored = Entries.Add(Id, MoveTemp(Entry));
 	Stats.Entries = Entries.Num();
@@ -157,6 +191,7 @@ bool FPlanetTerrainNextTileCache::Insert(
 	{
 		Found->LastUsedFrame = Frame;
 		Found->Tile = MoveTemp(Tile);
+		WriteThroughDisk(Found->Tile);
 		++Stats.Hits;
 		Stats.Entries = Entries.Num();
 		return true;
@@ -173,6 +208,8 @@ bool FPlanetTerrainNextTileCache::Insert(
 	{
 		return false;
 	}
+
+	WriteThroughDisk(Tile);
 
 	FEntry Entry;
 	Entry.LastUsedFrame = Frame;

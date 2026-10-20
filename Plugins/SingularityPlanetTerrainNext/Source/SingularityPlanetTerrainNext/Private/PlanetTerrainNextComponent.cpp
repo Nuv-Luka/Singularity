@@ -90,6 +90,12 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 		GeometricErrorByLevel);
 
 	TileCache = MakeShared<FPlanetTerrainNextTileCache>(Settings.CpuTileCacheSize);
+	DiskTileStore = MakeShared<FPlanetTerrainNextDiskTileStore>();
+	DiskTileStore->SetEnabled(Settings.bDiskCache);
+	DiskTileStore->SetMaxBytes(Settings.DiskCacheMaxMB > 0
+		? static_cast<int64>(Settings.DiskCacheMaxMB) * 1024 * 1024
+		: 0);
+	TileCache->SetDiskStore(DiskTileStore);
 	GpuPool = MakeShared<FPlanetTerrainNextGpuSlotPool>();
 	GpuPool->Initialize(GetOwner() ? static_cast<UObject*>(GetOwner()) : this, Settings.Lod.MaxNodes, PlanetTerrainNextHeightTile::DefaultResolution);
 	Scheduler = MakeShared<FPlanetTerrainNextTileScheduler>();
@@ -119,9 +125,11 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 	}
 	TArray<FPlanetTerrainNextDrawItem> DrawSet;
 	Quadtree.CollectDrawSet([this](const FPlanetTerrainNextNodeId& Id) { return Resident.Contains(Id); }, DrawSet);
+	FrameStats.bDrawCoverageOk = CheckDrawCoverage(DrawSet);
+	FrameStats.Drawn = DrawSet.Num();
 	ApplyDrawSet(DrawSet);
 	RefreshTilePins(DrawSet);
-	ApplyMorph(DrawSet);
+	ApplyMorph(DrawSet, 1.0f / 60.0f);
 
 	UE_LOG(LogPlanetTerrainNext, Log,
 		TEXT("TerrainNext R6 init planet=%lld R=%.1f km heights=[%.0f, %.0f] m roots=%d gpuSlots=%d in %.1f ms GE[0]=%.0f m GE[17]=%.2f m"),
@@ -159,6 +167,7 @@ void UPlanetTerrainNextComponent::ShutdownTerrain()
 	}
 	Resident.Reset();
 	Drawn.Reset();
+	HandoffHoldFrames.Reset();
 	if (GpuPool.IsValid())
 	{
 		GpuPool->Shutdown();
@@ -179,7 +188,12 @@ void UPlanetTerrainNextComponent::ShutdownTerrain()
 	CollisionResident.Reset();
 	CollisionManager.Reset();
 	Scheduler.Reset();
+	if (TileCache.IsValid())
+	{
+		TileCache->SetDiskStore(nullptr);
+	}
 	TileCache.Reset();
+	DiskTileStore.Reset();
 	GpuPool.Reset();
 	HeightField.Reset();
 	bInitialized = false;
@@ -207,11 +221,152 @@ void UPlanetTerrainNextComponent::OnUnregister()
 
 bool UPlanetTerrainNextComponent::HasFullCoverage() const
 {
+	if (!bInitialized)
+	{
+		return false;
+	}
+	// Prefer the last tick's draw-coverage flag (logical CollectDraw partition).
+	if (FrameStats.Drawn > 0)
+	{
+		return FrameStats.bDrawCoverageOk;
+	}
 	for (int32 Face = 0; Face < 6; ++Face)
 	{
 		if (!Resident.Contains(FPlanetTerrainNextNodeId(static_cast<uint8>(Face), 0, 0, 0)))
 		{
 			return false;
+		}
+	}
+	return true;
+}
+
+int32 UPlanetTerrainNextComponent::ApplyLodHandoff(
+	const TSet<FPlanetTerrainNextNodeId>& PreviousDrawn,
+	TSet<FPlanetTerrainNextNodeId>& InOutNext,
+	TMap<FPlanetTerrainNextNodeId, int32>& InOutHoldFrames,
+	int32 HoldFrames,
+	TFunctionRef<bool(const FPlanetTerrainNextNodeId&)> IsParentResident,
+	TFunctionRef<bool(const FPlanetTerrainNextNodeId&)> IsChildShown)
+{
+	const int32 HoldTotal = FMath::Max(HoldFrames, 1);
+	int32 Kept = 0;
+	TSet<FPlanetTerrainNextNodeId> ActiveParents;
+	for (const FPlanetTerrainNextNodeId& Prev : PreviousDrawn)
+	{
+		if (InOutNext.Contains(Prev))
+		{
+			InOutHoldFrames.Remove(Prev);
+			continue;
+		}
+		bool bAllFourInNext = true;
+		for (int32 Child = 0; Child < 4; ++Child)
+		{
+			if (!InOutNext.Contains(Prev.Child(Child)))
+			{
+				bAllFourInNext = false;
+				break;
+			}
+		}
+		if (!bAllFourInNext)
+		{
+			InOutHoldFrames.Remove(Prev);
+			continue;
+		}
+
+		// Already shown children finishing a prior hold: allow commit once hold hits 0.
+		bool bAllFourShown = true;
+		for (int32 Child = 0; Child < 4; ++Child)
+		{
+			if (!IsChildShown(Prev.Child(Child)))
+			{
+				bAllFourShown = false;
+				break;
+			}
+		}
+
+		int32* Remaining = InOutHoldFrames.Find(Prev);
+		if (!Remaining)
+		{
+			if (bAllFourShown)
+			{
+				// Children already visible from a previous commit — no hold.
+				continue;
+			}
+			if (!IsParentResident(Prev))
+			{
+				continue;
+			}
+			Remaining = &InOutHoldFrames.Add(Prev, HoldTotal);
+		}
+
+		if (*Remaining > 0)
+		{
+			for (int32 Child = 0; Child < 4; ++Child)
+			{
+				InOutNext.Remove(Prev.Child(Child));
+			}
+			InOutNext.Add(Prev);
+			--(*Remaining);
+			ActiveParents.Add(Prev);
+			++Kept;
+		}
+		else
+		{
+			// Commit children; clear hold.
+			InOutHoldFrames.Remove(Prev);
+		}
+	}
+
+	TArray<FPlanetTerrainNextNodeId> Stale;
+	for (const TPair<FPlanetTerrainNextNodeId, int32>& Pair : InOutHoldFrames)
+	{
+		if (!ActiveParents.Contains(Pair.Key) && !PreviousDrawn.Contains(Pair.Key))
+		{
+			Stale.Add(Pair.Key);
+		}
+	}
+	for (const FPlanetTerrainNextNodeId& Id : Stale)
+	{
+		InOutHoldFrames.Remove(Id);
+	}
+	return Kept;
+}
+
+bool UPlanetTerrainNextComponent::CheckDrawCoverage(const TArray<FPlanetTerrainNextDrawItem>& DrawSet) const
+{
+	double Area[6] = {0, 0, 0, 0, 0, 0};
+	TSet<FPlanetTerrainNextNodeId> DrawnIds;
+	DrawnIds.Reserve(DrawSet.Num());
+	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
+	{
+		if (!Resident.Contains(Item.Id))
+		{
+			return false;
+		}
+		bool bAlready = false;
+		DrawnIds.Add(Item.Id, &bAlready);
+		if (bAlready)
+		{
+			return false;
+		}
+		Area[Item.Id.Face] += Item.Id.Size() * Item.Id.Size();
+	}
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		if (!FMath::IsNearlyEqual(Area[Face], 1.0, 1.0e-9))
+		{
+			return false;
+		}
+	}
+	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
+	{
+		for (FPlanetTerrainNextNodeId Up = Item.Id; Up.Level > 0;)
+		{
+			Up = FPlanetTerrainNextNodeId(Up.Face, static_cast<uint8>(Up.Level - 1), Up.X >> 1, Up.Y >> 1);
+			if (DrawnIds.Contains(Up))
+			{
+				return false;
+			}
 		}
 	}
 	return true;
@@ -236,7 +391,8 @@ int32 UPlanetTerrainNextComponent::AcquireSlot()
 	Mesh->SetCanEverAffectNavigation(false);
 	Mesh->SetGenerateOverlapEvents(false);
 	Mesh->SetCastShadow(false); // Enabled when drawn if CastShadow CVar is on.
-	Mesh->bUseAsOccluder = true;
+	// Patches at mixed LOD must not occlude each other (false holes / checkerboard).
+	Mesh->bUseAsOccluder = false;
 	Mesh->bUseAsyncCooking = true;
 	Mesh->SetBoundsScale(1.0f);
 	Mesh->SetVisibility(false);
@@ -340,7 +496,8 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 	Slot.TileId = TileId;
 	Slot.GpuSlot = GpuSlot;
 	Slot.bInUse = true;
-	Slot.Morph = 1.0f; // Appear parent-compatible until ApplyMorph runs this frame.
+	Slot.Morph = 1.0f; // Parent-compatible until reveal + smooth open toward PE target.
+	Slot.MorphReveal = 0.0f;
 	Slot.MaxAbsCoarseDeltaCm = Patch.MaxAbsCoarseDeltaCm;
 	UploadPatch(Slot, Patch);
 	if (Slot.Material)
@@ -418,11 +575,27 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet)
 {
 	TSet<FPlanetTerrainNextNodeId> Next;
-	Next.Reserve(DrawSet.Num());
+	Next.Reserve(DrawSet.Num() + 8);
 	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
 	{
 		Next.Add(Item.Id);
 	}
+
+	// Hold parent for MorphHandoffFrames while children stay stripped (no co-draw / pop).
+	FrameStats.HandoffParentsKept = ApplyLodHandoff(
+		Drawn,
+		Next,
+		HandoffHoldFrames,
+		Settings.MorphHandoffFrames,
+		[this](const FPlanetTerrainNextNodeId& Id) { return Resident.Contains(Id); },
+		[this](const FPlanetTerrainNextNodeId& Id)
+		{
+			if (const int32* SlotIndex = Resident.Find(Id))
+			{
+				return Slots[*SlotIndex].bShown;
+			}
+			return false;
+		});
 
 	int32 Changes = 0;
 	// Show first, then hide, so a frame never has fewer patches than the coverage requires.
@@ -493,8 +666,9 @@ void UPlanetTerrainNextComponent::RefreshTilePins(const TArray<FPlanetTerrainNex
 	}
 }
 
-void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet)
+void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds)
 {
+	const float Dt = FMath::Max(DeltaSeconds, 0.0f);
 	int32 Updates = 0;
 	double MorphSum = 0.0;
 	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
@@ -505,19 +679,38 @@ void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDraw
 			continue;
 		}
 		FSlot& Slot = Slots[*SlotIndex];
-		float Morph = 0.0f;
+		float Target = 0.0f;
 		if (!Settings.bMorphEnabled)
 		{
-			Morph = 0.0f;
+			Target = 0.0f;
+			Slot.MorphReveal = 1.0f;
 		}
 		else if (Settings.MorphForce >= 0.0f)
 		{
-			Morph = FMath::Clamp(Settings.MorphForce, 0.0f, 1.0f);
+			Target = FMath::Clamp(Settings.MorphForce, 0.0f, 1.0f);
+			Slot.MorphReveal = 1.0f;
 		}
 		else
 		{
-			Morph = PlanetTerrainNextPatch::MorphFromPixelError(
+			const float PeTarget = PlanetTerrainNextPatch::MorphFromPixelError(
 				Item.PixelError, Settings.Lod.TargetPixelError, Settings.MorphEndFactor);
+			// New children: MorphReveal 0→1 blends parent-compatible (1) into PE target.
+			if (Settings.MorphRevealSeconds <= KINDA_SMALL_NUMBER)
+			{
+				Slot.MorphReveal = 1.0f;
+			}
+			else
+			{
+				Slot.MorphReveal = FMath::Min(1.0f, Slot.MorphReveal + Dt / Settings.MorphRevealSeconds);
+			}
+			Target = FMath::Lerp(1.0f, PeTarget, Slot.MorphReveal);
+		}
+
+		float Morph = Target;
+		if (Settings.MorphSmoothSeconds > KINDA_SMALL_NUMBER && Settings.bMorphEnabled && Settings.MorphForce < 0.0f)
+		{
+			const float Alpha = 1.0f - FMath::Exp(-Dt / Settings.MorphSmoothSeconds);
+			Morph = FMath::Lerp(Slot.Morph, Target, Alpha);
 		}
 
 		if (Slot.Material && !FMath::IsNearlyEqual(Slot.Morph, Morph, 1.0e-4f))
@@ -549,6 +742,7 @@ void UPlanetTerrainNextComponent::HideAll()
 		Slot.bShown = false;
 	}
 	Drawn.Reset();
+	HandoffHoldFrames.Reset();
 	for (const TPair<FPlanetTerrainNextNodeId, int32>& Pair : CollisionResident)
 	{
 		if (CollisionMeshes.IsValidIndex(Pair.Value) && CollisionMeshes[Pair.Value])
@@ -859,6 +1053,13 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		return;
 	}
 	TileCache->SetMaxEntries(Settings.CpuTileCacheSize);
+	if (DiskTileStore.IsValid())
+	{
+		DiskTileStore->SetEnabled(Settings.bDiskCache);
+		DiskTileStore->SetMaxBytes(Settings.DiskCacheMaxMB > 0
+			? static_cast<int64>(Settings.DiskCacheMaxMB) * 1024 * 1024
+			: 0);
+	}
 	Scheduler->SetBudgets(Settings.MaxBakeWorkers, Settings.MaxBakeQueue);
 	++FrameCounter;
 	GpuPool->BeginFrame(FrameCounter);
@@ -935,12 +1136,13 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 	TArray<FPlanetTerrainNextDrawItem> DrawSet;
 	Quadtree.CollectDrawSet(IsReady, DrawSet);
+	FrameStats.bDrawCoverageOk = CheckDrawCoverage(DrawSet);
 	ApplyDrawSet(DrawSet);
 	const double CollStart = FPlatformTime::Seconds();
 	UpdateCollision(View);
 	FrameStats.CollisionMs = (FPlatformTime::Seconds() - CollStart) * 1000.0;
 	RefreshTilePins(DrawSet);
-	ApplyMorph(DrawSet);
+	ApplyMorph(DrawSet, DeltaTime);
 
 	const FPlanetTerrainNextQuadtreeStats& TreeStats = Quadtree.GetStats();
 	FrameStats.Nodes = TreeStats.Nodes;
@@ -953,15 +1155,38 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	FrameStats.BuiltThisFrame = Built;
 	FrameStats.Slots = Slots.Num();
 	FrameStats.MaxDrawnLevel = 0;
+	FrameStats.DrawnL0 = 0;
+	FrameStats.DrawnL1 = 0;
+	FrameStats.DrawnL2 = 0;
+	FrameStats.DrawnL3Plus = 0;
 	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
 	{
 		FrameStats.MaxDrawnLevel = FMath::Max(FrameStats.MaxDrawnLevel, static_cast<int32>(Item.Id.Level));
+		if (Item.Id.Level == 0)
+		{
+			++FrameStats.DrawnL0;
+		}
+		else if (Item.Id.Level == 1)
+		{
+			++FrameStats.DrawnL1;
+		}
+		else if (Item.Id.Level == 2)
+		{
+			++FrameStats.DrawnL2;
+		}
+		else
+		{
+			++FrameStats.DrawnL3Plus;
+		}
 	}
 	const FPlanetTerrainNextTileCacheStats& CacheStats = TileCache->GetStats();
 	const FPlanetTerrainNextGpuPoolStats& GpuStats = GpuPool->GetStats();
 	FrameStats.TileCacheHits = CacheStats.Hits;
 	FrameStats.TileCacheMisses = CacheStats.Misses;
 	FrameStats.TileBakes = CacheStats.BakesThisFrame;
+	FrameStats.DiskHits = CacheStats.DiskHits;
+	FrameStats.DiskMisses = CacheStats.DiskMisses;
+	FrameStats.DiskWrites = CacheStats.DiskWrites;
 	FrameStats.TileBakeP95Ms = CacheStats.P95BakeMs;
 	FrameStats.GpuResident = GpuStats.Resident;
 	FrameStats.GpuUploads = GpuStats.UploadsThisFrame;
@@ -1014,8 +1239,12 @@ void UPlanetTerrainNextComponent::PrintStats() const
 		0.0f,
 		HasFullCoverage() ? FColor(140, 230, 140) : FColor::Red,
 		FString::Printf(
-			TEXT("TerrainNext R8 | alt %s | drawn %d L%d | morph %.2f | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f | tick %.2f ms"),
-			*AltitudeText, S.Drawn, S.MaxDrawnLevel, S.MeanMorph,
+			TEXT("TerrainNext R8 | alt %s | drawn %d L%d (L0:%d L1:%d L2:%d L3+:%d) handoff %d | cov %s | disk %d/%d w%d | morph %.2f | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f | tick %.2f ms"),
+			*AltitudeText, S.Drawn, S.MaxDrawnLevel,
+			S.DrawnL0, S.DrawnL1, S.DrawnL2, S.DrawnL3Plus, S.HandoffParentsKept,
+			S.bDrawCoverageOk ? TEXT("ok") : TEXT("HOLE"),
+			S.DiskHits, S.DiskMisses, S.DiskWrites,
+			S.MeanMorph,
 			S.CollisionResident, S.CollisionDesired,
 			S.TreeMs, S.ScheduleMs, S.MeshBuildMs, S.CollisionMs,
 			S.UpdateMs));

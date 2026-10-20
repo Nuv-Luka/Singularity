@@ -79,10 +79,10 @@ struct FPlanetTerrainNextLodSettings
 	int32 MaxLevel = 17;
 	/** Hard cap on tree nodes (each node owns one resident patch). */
 	int32 MaxNodes = 512;
-	/** Seconds an offscreen split survives before merging. */
-	double InvisibleGraceSeconds = 1.0;
+	/** Seconds an offscreen split survives before merging (also after horizon fade). */
+	double InvisibleGraceSeconds = 2.0;
 	/** Nodes this close to the camera nadir (geodesic) count as visible. */
-	double SafetyRadiusMinM = 500.0;
+	double SafetyRadiusMinM = 5000.0;
 	bool bFreeze = false;
 	/**
 	 * Optional peripheral LOD weight (R8). Multiplies projected pixel error by

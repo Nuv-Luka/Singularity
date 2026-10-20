@@ -64,7 +64,7 @@ SINGULARITYPLANETTERRAINNEXT_API double RecommendedSkirtDepthM(double GeometricE
  * 0 = full fine detail, 1 = exactly the parent-compatible coarse surface.
  * Morph = 1 - smoothstep(Target, Target * EndFactor, PixelError).
  */
-SINGULARITYPLANETTERRAINNEXT_API float MorphFromPixelError(double PixelError, double TargetPixelError, double EndFactor = 2.0);
+SINGULARITYPLANETTERRAINNEXT_API float MorphFromPixelError(double PixelError, double TargetPixelError, double EndFactor = 3.5);
 
 SINGULARITYPLANETTERRAINNEXT_API void Build(
 	const FPlanetTerrainNextHeightField& HeightField,

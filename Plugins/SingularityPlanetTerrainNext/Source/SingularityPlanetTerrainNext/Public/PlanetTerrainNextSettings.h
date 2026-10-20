@@ -23,11 +23,22 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	bool bShowStats = true;
 	/** Shader geomorph: Morph = 1 - smoothstep(Target, Target * MorphEnd, PixelError). */
 	bool bMorphEnabled = true;
-	double MorphEndFactor = 2.0;
+	/** Wider band softens LOD pops (DSE used ~2; 3.5 is a gentler default). */
+	double MorphEndFactor = 3.5;
 	/** Force every drawn patch to this morph (0..1). < 0 = use SSE. Test hook. */
 	float MorphForce = -1.0f;
+	/** Exponential chase time for Morph toward its target (seconds). 0 = snap. */
+	float MorphSmoothSeconds = 0.25f;
+	/** After a child patch appears, blend Morph from 1 (parent) → PE target over this many seconds. */
+	float MorphRevealSeconds = 0.45f;
+	/** Keep parent drawn this many frames after children are ready (no co-draw). */
+	int32 MorphHandoffFrames = 6;
 	/** Max CPU height tiles kept (separate from GPU residency). */
 	int32 CpuTileCacheSize = 1024;
+	/** Persist height tiles under Saved/SingularityPlanetTerrainNext/Tiles. */
+	bool bDiskCache = true;
+	/** Soft cap on disk tile folder size (megabytes). 0 = unlimited. */
+	int32 DiskCacheMaxMB = 512;
 	/** Max GPU atlas uploads (and mesh builds that need a new GPU slot) per frame. */
 	int32 TileUploadsPerFrame = 16;
 	/** Concurrent CPU height-tile bake workers (bench 2/4/6; default 4). */

@@ -154,9 +154,12 @@ bool FPlanetTerrainNextQuadtree::IsVisible(const FNode& Node, const FPlanetTerra
 	const double Highest = RadiusM + GlobalMaxH;
 	if (CameraRadius > Occluder)
 	{
+		// Horizon + patch angular radius + 15% slack: grazing limb patches stay
+		// visible/split-eligible instead of vanishing on approach.
 		const double Horizon = FMath::Acos(FMath::Clamp(Occluder / CameraRadius, -1.0, 1.0))
 			+ FMath::Acos(FMath::Clamp(Occluder / Highest, -1.0, 1.0));
-		if (AngleGap > Horizon)
+		const double HorizonLimit = (Horizon + Node.AngularRadius) * 1.15;
+		if (AngleGap > HorizonLimit)
 		{
 			return false;
 		}

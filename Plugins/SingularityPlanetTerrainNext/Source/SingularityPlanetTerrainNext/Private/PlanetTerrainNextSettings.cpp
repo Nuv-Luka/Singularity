@@ -56,18 +56,43 @@ TAutoConsoleVariable<bool> CVarMorphEnabled(
 
 TAutoConsoleVariable<float> CVarMorphEnd(
 	TEXT("singularity.TerrainNext.MorphEnd"),
-	2.0f,
-	TEXT("Morph = 1 - smoothstep(Target, Target * MorphEnd, PixelError). 2 matches DeepSpaceEngine's 1x..2x band."));
+	3.5f,
+	TEXT("Morph = 1 - smoothstep(Target, Target * MorphEnd, PixelError). Wider = softer LOD pops."));
 
 TAutoConsoleVariable<float> CVarMorphForce(
 	TEXT("singularity.TerrainNext.MorphForce"),
 	-1.0f,
 	TEXT("Force Morph on every drawn patch (0 = fine, 1 = coarse). Negative = drive from pixel error."));
 
+TAutoConsoleVariable<float> CVarMorphSmooth(
+	TEXT("singularity.TerrainNext.MorphSmooth"),
+	0.25f,
+	TEXT("Seconds to exponentially chase Morph toward its target. 0 = snap each frame."));
+
+TAutoConsoleVariable<float> CVarMorphReveal(
+	TEXT("singularity.TerrainNext.MorphReveal"),
+	0.45f,
+	TEXT("Seconds for a new child patch to blend from Morph=1 (parent) to its PE target."));
+
+TAutoConsoleVariable<int32> CVarMorphHandoffFrames(
+	TEXT("singularity.TerrainNext.MorphHandoffFrames"),
+	6,
+	TEXT("Frames to keep the parent drawn after children are ready (children hidden; no co-draw)."));
+
 TAutoConsoleVariable<int32> CVarCpuTileCache(
 	TEXT("singularity.TerrainNext.CpuTileCache"),
 	1024,
 	TEXT("Max canonical CPU height tiles. Separate from GPU atlas residency."));
+
+TAutoConsoleVariable<bool> CVarDiskCache(
+	TEXT("singularity.TerrainNext.DiskCache"),
+	true,
+	TEXT("R8: persist height tiles to Saved/SingularityPlanetTerrainNext/Tiles."));
+
+TAutoConsoleVariable<int32> CVarDiskCacheMaxMB(
+	TEXT("singularity.TerrainNext.DiskCacheMaxMB"),
+	512,
+	TEXT("R8: soft cap on disk tile folder size in megabytes (0 = unlimited)."));
 
 TAutoConsoleVariable<int32> CVarTileUploadsPerFrame(
 	TEXT("singularity.TerrainNext.TileUploadsPerFrame"),
@@ -135,7 +160,12 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.bMorphEnabled = CVarMorphEnabled.GetValueOnGameThread();
 	Out.MorphEndFactor = FMath::Max(1.01, static_cast<double>(CVarMorphEnd.GetValueOnGameThread()));
 	Out.MorphForce = CVarMorphForce.GetValueOnGameThread();
+	Out.MorphSmoothSeconds = FMath::Max(0.0f, CVarMorphSmooth.GetValueOnGameThread());
+	Out.MorphRevealSeconds = FMath::Max(0.0f, CVarMorphReveal.GetValueOnGameThread());
+	Out.MorphHandoffFrames = FMath::Clamp(CVarMorphHandoffFrames.GetValueOnGameThread(), 1, 120);
 	Out.CpuTileCacheSize = FMath::Clamp(CVarCpuTileCache.GetValueOnGameThread(), 8, 16384);
+	Out.bDiskCache = CVarDiskCache.GetValueOnGameThread();
+	Out.DiskCacheMaxMB = FMath::Clamp(CVarDiskCacheMaxMB.GetValueOnGameThread(), 0, 1024 * 1024);
 	Out.TileUploadsPerFrame = FMath::Clamp(CVarTileUploadsPerFrame.GetValueOnGameThread(), 1, 256);
 	Out.MaxBakeWorkers = FMath::Clamp(CVarMaxBakeWorkers.GetValueOnGameThread(), 1, 16);
 	Out.MaxBakeQueue = FMath::Clamp(CVarMaxBakeQueue.GetValueOnGameThread(), 8, 4096);

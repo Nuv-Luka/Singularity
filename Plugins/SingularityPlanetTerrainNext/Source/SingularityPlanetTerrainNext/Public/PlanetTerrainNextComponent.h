@@ -1,8 +1,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Templates/Function.h"
 #include "Components/SceneComponent.h"
 #include "PlanetTerrainNextCollisionManager.h"
+#include "PlanetTerrainNextDiskTileStore.h"
 #include "PlanetTerrainNextGpuSlotPool.h"
 #include "PlanetTerrainNextHeightField.h"
 #include "PlanetTerrainNextQuadtree.h"
@@ -29,11 +31,23 @@ struct FPlanetTerrainNextFrameStats
 	int32 Merges = 0;
 	int32 BudgetBlocked = 0;
 	int32 MaxDrawnLevel = 0;
+	/** Drawn patch counts for levels 0..3 (diagnose L0/L1 unload vs holes). */
+	int32 DrawnL0 = 0;
+	int32 DrawnL1 = 0;
+	int32 DrawnL2 = 0;
+	int32 DrawnL3Plus = 0;
+	/** Parents kept visible until replacing children have been shown at least once. */
+	int32 HandoffParentsKept = 0;
+	/** Logical draw-set face area coverage (ignores one-frame handoff overlap). */
+	bool bDrawCoverageOk = true;
 	int32 Slots = 0;
 	int32 MorphUniformUpdates = 0;
 	int32 TileCacheHits = 0;
 	int32 TileCacheMisses = 0;
 	int32 TileBakes = 0;
+	int32 DiskHits = 0;
+	int32 DiskMisses = 0;
+	int32 DiskWrites = 0;
 	int32 GpuResident = 0;
 	int32 GpuUploads = 0;
 	int32 GpuEvictions = 0;
@@ -86,8 +100,24 @@ public:
 	virtual void OnUnregister() override;
 
 	bool IsTerrainActive() const { return bInitialized; }
-	/** True when every face root is resident, i.e. the planet is fully covered. */
+	/**
+	 * True when the logical draw set partitions all six faces (area ≈ 1 each).
+	 * Roots staying resident while refined is not enough — use this for hole detection.
+	 */
 	bool HasFullCoverage() const;
+
+	/**
+	 * LOD handoff without overlap (overlap z-fights as a triangle checkerboard).
+	 * Holds the parent for HoldFrames while children stay stripped, then commits children.
+	 * InOutHoldFrames maps parent → remaining hold frames.
+	 */
+	static int32 ApplyLodHandoff(
+		const TSet<FPlanetTerrainNextNodeId>& PreviousDrawn,
+		TSet<FPlanetTerrainNextNodeId>& InOutNext,
+		TMap<FPlanetTerrainNextNodeId, int32>& InOutHoldFrames,
+		int32 HoldFrames,
+		TFunctionRef<bool(const FPlanetTerrainNextNodeId&)> IsParentResident,
+		TFunctionRef<bool(const FPlanetTerrainNextNodeId&)> IsChildShown);
 
 	/** Height of the collision/fine surface below WorldPointUu, in meters above it. */
 	double GetAltitudeMeters(const FVector& WorldPointUu) const;
@@ -111,6 +141,8 @@ private:
 		FPlanetTerrainNextTileId TileId;
 		int32 GpuSlot = INDEX_NONE;
 		float Morph = 0.0f;
+		/** 0 = locked to parent (Morph→1), 1 = fully driven by pixel-error target. */
+		float MorphReveal = 1.0f;
 		double MaxAbsCoarseDeltaCm = 0.0;
 		bool bInUse = false;
 		bool bHasSection = false;
@@ -123,7 +155,8 @@ private:
 	bool BuildNode(const FPlanetTerrainNextNodeId& Id);
 	void UploadPatch(FSlot& Slot, const FPlanetTerrainNextPatchData& Patch);
 	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
-	void ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
+	bool CheckDrawCoverage(const TArray<FPlanetTerrainNextDrawItem>& DrawSet) const;
+	void ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds);
 	void RefreshTilePins(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
 	void UpdateCollision(const FPlanetTerrainNextView& View);
 	bool CookCollisionNode(const FPlanetTerrainNextNodeId& Id);
@@ -141,6 +174,7 @@ private:
 	FPlanetTerrainNextQuadtree Quadtree;
 	/** Shared: UCLASS members must be copyable; the cache holds non-copyable maps internally. */
 	TSharedPtr<FPlanetTerrainNextTileCache> TileCache;
+	TSharedPtr<FPlanetTerrainNextDiskTileStore> DiskTileStore;
 	TSharedPtr<FPlanetTerrainNextGpuSlotPool> GpuPool;
 	TSharedPtr<FPlanetTerrainNextTileScheduler> Scheduler;
 	FPlanetTerrainNextTilePlanner Planner;
@@ -164,6 +198,8 @@ private:
 	TArray<int32> FreeSlots;
 	TMap<FPlanetTerrainNextNodeId, int32> Resident;
 	TSet<FPlanetTerrainNextNodeId> Drawn;
+	/** Parents held N frames so children replace them without co-drawing / hard pops. */
+	TMap<FPlanetTerrainNextNodeId, int32> HandoffHoldFrames;
 	TMap<FPlanetTerrainNextNodeId, int32> CollisionResident;
 	TArray<int32> FreeCollisionSlots;
 

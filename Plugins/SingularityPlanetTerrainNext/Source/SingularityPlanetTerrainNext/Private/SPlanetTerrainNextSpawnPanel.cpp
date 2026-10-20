@@ -287,7 +287,27 @@ void SPlanetTerrainNextSpawnPanel::Construct(const FArguments& InArgs)
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 						[
+							MakeCVarCheckRow(TEXT("Disk tile cache"), TEXT("singularity.TerrainNext.DiskCache"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarIntRow(TEXT("Disk cache max MB"), TEXT("singularity.TerrainNext.DiskCacheMaxMB"), 0, 8192)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
 							MakeCVarFloatRow(TEXT("Morph end factor"), TEXT("singularity.TerrainNext.MorphEnd"), 1.01f, 8.0f)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarFloatRow(TEXT("Morph smooth (s)"), TEXT("singularity.TerrainNext.MorphSmooth"), 0.0f, 2.0f)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarFloatRow(TEXT("Morph reveal (s)"), TEXT("singularity.TerrainNext.MorphReveal"), 0.0f, 2.0f)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarIntRow(TEXT("Morph handoff frames"), TEXT("singularity.TerrainNext.MorphHandoffFrames"), 1, 60)
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 						[

@@ -87,4 +87,4 @@ Assisted descent / orbit→surface flight integration — see `R7_Status.md`. No
 
 ## R8 polish (current)
 
-Optional `PeripheralLodScale` frustum-rim PE weight (default 1 = off). Per-tick stage timings on the stats line. Camera-turn coverage stress test.
+Optional `PeripheralLodScale` frustum-rim PE weight (default 1 = off). Per-tick stage timings on the stats line. Camera-turn coverage stress test. LOD handoff hold + horizon slack. Persistent disk height-tile store (`FPlanetTerrainNextDiskTileStore`) behind `FPlanetTerrainNextTileCache`. Morph pop reduction: wider MorphEnd, temporal MorphSmooth, MorphReveal ramp, MorphHandoffFrames. Known open: approach checkerboard / patch holes in PIE (see `R8_Status.md`).

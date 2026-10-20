@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "PlanetTerrainNextHeightTile.h"
 
+class FPlanetTerrainNextDiskTileStore;
 class FPlanetTerrainNextHeightField;
 
 struct FPlanetTerrainNextTileCacheStats
@@ -12,6 +13,9 @@ struct FPlanetTerrainNextTileCacheStats
 	int32 Misses = 0;
 	int32 Evictions = 0;
 	int32 BakesThisFrame = 0;
+	int32 DiskHits = 0;
+	int32 DiskMisses = 0;
+	int32 DiskWrites = 0;
 	double LastBakeMs = 0.0;
 	double P95BakeMs = 0.0;
 };
@@ -20,6 +24,7 @@ struct FPlanetTerrainNextTileCacheStats
  * Canonical CPU height-tile cache. Separate from GPU slot residency.
  * Identity excludes camera epoch. Eviction never drops tiles that are GPU-pinned
  * (caller passes a predicate); otherwise LRU by last touch frame.
+ * Optional disk store: memory miss → TryLoad → bake; bake/Insert write-through.
  */
 class SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextTileCache
 {
@@ -28,6 +33,9 @@ public:
 
 	void SetMaxEntries(int32 MaxEntries);
 	int32 GetMaxEntries() const { return MaxEntries; }
+
+	void SetDiskStore(const TSharedPtr<FPlanetTerrainNextDiskTileStore>& InDisk) { Disk = InDisk; }
+	TSharedPtr<FPlanetTerrainNextDiskTileStore> GetDiskStore() const { return Disk; }
 
 	/** Returns a stable pointer until the next mutating call that may evict. */
 	const FPlanetTerrainNextHeightTile* GetOrBake(
@@ -38,7 +46,7 @@ public:
 
 	/**
 	 * Insert a worker-baked tile. Rejects empty tiles. Touches LRU.
-	 * Returns false if the cache is full of pinned entries.
+	 * Returns false if the cache is full of pinned entries. Write-through to disk when set.
 	 */
 	bool Insert(
 		FPlanetTerrainNextHeightTile&& Tile,
@@ -63,9 +71,11 @@ private:
 
 	bool EvictOne(int64 Frame, TFunctionRef<bool(const FPlanetTerrainNextTileId&)> IsPinned);
 	void RecordBakeTime(double Ms);
+	void WriteThroughDisk(const FPlanetTerrainNextHeightTile& Tile);
 
 	int32 MaxEntries = 1024;
 	TMap<FPlanetTerrainNextTileId, FEntry> Entries;
+	TSharedPtr<FPlanetTerrainNextDiskTileStore> Disk;
 	FPlanetTerrainNextTileCacheStats Stats;
 	TArray<double> BakeTimesMs;
 	int32 BakeTimeCursor = 0;
