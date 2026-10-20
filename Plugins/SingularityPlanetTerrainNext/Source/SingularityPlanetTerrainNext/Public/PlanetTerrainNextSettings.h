@@ -52,6 +52,8 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	int32 DiskCacheMaxMB = 512;
 	/** Max GPU atlas uploads (and mesh builds that need a new GPU slot) per frame. */
 	int32 TileUploadsPerFrame = 16;
+	/** Maximum ProceduralMeshComponent section commits per frame during runtime refinement. */
+	int32 MeshCommitsPerFrame = 4;
 	/** Concurrent CPU height-tile bake workers (bench 2/4/6; default 4). */
 	int32 MaxBakeWorkers = 4;
 	/** Max queued bake requests (coverage can displace optional). */
@@ -60,6 +62,8 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	int32 PrefetchPerFrame = 8;
 	/** Local collision geodesic radius (metres). */
 	double CollisionRadiusM = 200.0;
+	/** Do not maintain local collision above this altitude; visual streaming remains independent. */
+	double CollisionMaxAltitudeM = 10000.0;
 	/** Target collision vertex spacing (metres). */
 	double CollisionSpacingM = 4.0;
 	int32 CollisionMaxPatches = 24;
@@ -91,6 +95,8 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	float LodTransitionSeconds = 0.45f;
 	/** Cap concurrent fade groups; excess splits fall back to exclusive handoff. */
 	int32 MaxConcurrentTransitionGroups = 24;
+	/** Opt-in startup recovery preset; defaults off for normal builds. */
+	bool bEmergencyMode = false;
 	/** R10 measurement: append one terrain sample per tick to Saved/Logs/PlanetTerrainNextPerf.csv. */
 	bool bPerfCapture = false;
 	/** R10 measurement scenario label written to the CSV. */

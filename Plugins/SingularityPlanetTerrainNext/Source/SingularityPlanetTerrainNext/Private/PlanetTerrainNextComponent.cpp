@@ -38,6 +38,16 @@ UMaterialInterface* LoadPatchMaterial()
 	return Cached.Get();
 }
 
+UMaterialInterface* LoadStablePatchMaterial()
+{
+	static TWeakObjectPtr<UMaterialInterface> Cached;
+	if (!Cached.IsValid())
+	{
+		Cached = PlanetTerrainNextMorphMaterial::GetOrCreateStable();
+	}
+	return Cached.Get();
+}
+
 FLinearColor DebugColorFor(EPlanetTerrainNextDebugColor Mode, const FPlanetTerrainNextNodeId& Id, float Morph)
 {
 	switch (Mode)
@@ -141,12 +151,14 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 	FrameStats = FPlanetTerrainNextFrameStats();
 	bInitialized = true;
 
-	// Coverage before anything else: all six roots resident before the first draw.
+	// Coverage before anything else: all six roots may use the explicit bootstrap fallback.
+	bAllowSynchronousBootstrap = true;
 	const double Start = FPlatformTime::Seconds();
 	for (int32 Face = 0; Face < 6; ++Face)
 	{
 		BuildNode(FPlanetTerrainNextNodeId(static_cast<uint8>(Face), 0, 0, 0));
 	}
+	bAllowSynchronousBootstrap = false;
 	TArray<FPlanetTerrainNextDrawItem> DrawSet;
 	Quadtree.CollectDrawSet([this](const FPlanetTerrainNextNodeId& Id) { return Resident.Contains(Id); }, DrawSet);
 	FrameStats.bDrawCoverageOk = CheckDrawCoverage(DrawSet);
@@ -233,6 +245,10 @@ void UPlanetTerrainNextComponent::ShutdownTerrain()
 	if (TileCache.IsValid())
 	{
 		TileCache->SetDiskStore(nullptr);
+	}
+	if (DiskTileStore.IsValid())
+	{
+		DiskTileStore->Shutdown();
 	}
 	TileCache.Reset();
 	DiskTileStore.Reset();
@@ -441,16 +457,23 @@ int32 UPlanetTerrainNextComponent::AcquireSlot()
 	Mesh->RegisterComponent();
 
 	UMaterialInstanceDynamic* Material = nullptr;
-	if (UMaterialInterface* Base = LoadPatchMaterial())
+	UMaterialInstanceDynamic* TransitionMaterial = nullptr;
+	if (UMaterialInterface* Base = LoadStablePatchMaterial())
 	{
 		Material = UMaterialInstanceDynamic::Create(Base, Mesh);
+	}
+	if (UMaterialInterface* Base = LoadPatchMaterial())
+	{
+		TransitionMaterial = UMaterialInstanceDynamic::Create(Base, Mesh);
 	}
 
 	FSlot Slot;
 	Slot.Mesh = Mesh;
 	Slot.Material = Material;
+	Slot.TransitionMaterial = TransitionMaterial;
 	SlotMeshes.Add(Mesh);
 	SlotMaterials.Add(Material);
+	SlotTransitionMaterials.Add(TransitionMaterial);
 	return Slots.Add(Slot);
 }
 
@@ -472,6 +495,12 @@ void UPlanetTerrainNextComponent::ReleaseNode(const FPlanetTerrainNextNodeId& Id
 		Slot.GpuSlot = INDEX_NONE;
 	}
 	Slot.bShown = false;
+	ReconcileShadowState(Slot, false, false);
+	if (Slot.Mesh && Slot.Material && Slot.bTransitionMaterialActive)
+	{
+		Slot.Mesh->SetMaterial(0, Slot.Material);
+		Slot.bTransitionMaterialActive = false;
+	}
 	Slot.bInUse = false;
 	Slot.bCpuMorph = false;
 	Slot.FineCm.Reset();
@@ -552,16 +581,21 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 		return GpuPool->IsPinned(Key);
 	};
 
-	// Prefer async-baked cache hits. Sync GetOrBake is the coverage fallback so roots
-	// and newly visible parents never wait on a full worker queue.
+	// Runtime refinement must consume only resident CPU tiles. Synchronous generation
+	// is reserved for the six bootstrap roots in InitializeTerrain.
 	const FPlanetTerrainNextHeightTile* Tile = TileCache->Find(TileId);
 	if (Tile)
 	{
 		TileCache->Touch(TileId, FrameCounter);
 	}
-	else
+	else if (bAllowSynchronousBootstrap)
 	{
 		Tile = TileCache->GetOrBake(*HeightField, TileId, FrameCounter, IsPinned);
+	}
+	else
+	{
+		++FrameStats.DeferredMissingTiles;
+		return false;
 	}
 	if (!Tile)
 	{
@@ -644,6 +678,7 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 
 void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainNextPatchData& Patch)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_MeshSectionUpload);
 	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_UploadPatch);
 	Slot.Mesh->SetRelativeLocation(Patch.OriginM * PlanetTerrainNext::CmPerMeter);
 
@@ -737,6 +772,7 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 
 void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_CpuMorphMeshSectionUpload);
 	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_UploadCpuMorphedSection);
 	const double UploadStart = FPlatformTime::Seconds();
 	const int32 Num = Slot.FineCm.Num();
@@ -992,6 +1028,30 @@ void UPlanetTerrainNextComponent::ApplyDrawSetDithered(
 		}
 		if (PlanetTerrainNextLodFade::TickFade(Fade, DeltaSeconds))
 		{
+			auto RestoreStableMaterial = [this](const FPlanetTerrainNextNodeId& Id)
+			{
+				if (const int32* SlotIndex = Resident.Find(Id))
+				{
+					FSlot& Slot = Slots[*SlotIndex];
+					if (Slot.Mesh && Slot.Material && Slot.bTransitionMaterialActive)
+					{
+						Slot.Mesh->SetMaterial(0, Slot.Material);
+						Slot.bTransitionMaterialActive = false;
+					}
+					Slot.LastLodFadeParam = -1.0f;
+					Slot.LastLodFadeRoleParam = -1.0f;
+					if (Slot.Material)
+					{
+						Slot.Material->SetScalarParameterValue(TEXT("LodFade"), 0.0f);
+						Slot.Material->SetScalarParameterValue(TEXT("LodFadeRole"), 0.0f);
+					}
+				}
+			};
+			RestoreStableMaterial(Fade.Parent);
+			for (int32 Child = 0; Child < 4; ++Child)
+			{
+				RestoreStableMaterial(Fade.Parent.Child(Child));
+			}
 			LodFades.RemoveAtSwap(Index);
 		}
 	}
@@ -1025,13 +1085,13 @@ void UPlanetTerrainNextComponent::SyncVisibilityToRenderSet(const TSet<FPlanetTe
 			{
 				BeginVisibleHandoff(Slot);
 				Slot.Mesh->SetVisibility(true);
-				Slot.Mesh->SetCastShadow(Settings.bCastShadow);
 				Slot.bShown = true;
+				ReconcileShadowState(Slot, false, true);
 				++Changes;
 			}
 			else
 			{
-				Slot.Mesh->SetCastShadow(Settings.bCastShadow);
+				ReconcileShadowState(Slot, false, true);
 				if (Slot.LodTransition == ELodTransition::Splitting && Slot.MorphReveal >= 1.0f - KINDA_SMALL_NUMBER)
 				{
 					Slot.LodTransition = ELodTransition::Stable;
@@ -1049,8 +1109,8 @@ void UPlanetTerrainNextComponent::SyncVisibilityToRenderSet(const TSet<FPlanetTe
 				if (Slot.bShown)
 				{
 					Slot.Mesh->SetVisibility(false);
-					Slot.Mesh->SetCastShadow(false);
 					Slot.bShown = false;
+					ReconcileShadowState(Slot, false, false);
 					Slot.LodTransition = ELodTransition::Merging;
 					Slot.MorphReveal = 0.0f;
 					Slot.Morph = 1.0f;
@@ -1069,16 +1129,53 @@ void UPlanetTerrainNextComponent::SyncVisibilityToRenderSet(const TSet<FPlanetTe
 	FrameStats.VisibilityChanges = Changes;
 }
 
+void UPlanetTerrainNextComponent::ReconcileShadowState(FSlot& Slot, bool bInFade, bool bDominant)
+{
+	if (!Slot.Mesh)
+	{
+		return;
+	}
+	const bool bDesiredCastShadow = Settings.bCastShadow && Slot.bShown && (!bInFade || bDominant);
+	if (Slot.bAppliedCastShadow != bDesiredCastShadow)
+	{
+		Slot.Mesh->SetCastShadow(bDesiredCastShadow);
+		Slot.bAppliedCastShadow = bDesiredCastShadow;
+		++FrameStats.ShadowStateChanges;
+	}
+}
+
 void UPlanetTerrainNextComponent::ApplyLodFadeParams()
 {
-	TMap<FPlanetTerrainNextNodeId, float> FadeByParent;
-	for (const FPlanetTerrainNextLodFade& Fade : LodFades)
+	if (LodFades.Num() == 0)
 	{
-		FadeByParent.Add(Fade.Parent, Fade.Progress);
+		return;
 	}
 
-	for (FSlot& Slot : Slots)
+	TMap<FPlanetTerrainNextNodeId, float> FadeByParent;
+	TSet<FPlanetTerrainNextNodeId> Participants;
+	for (const FPlanetTerrainNextLodFade& Fade : LodFades)
 	{
+		if (Fade.State != EPlanetTerrainNextLodFadeState::FadingToChildren
+			&& Fade.State != EPlanetTerrainNextLodFadeState::FadingToParent)
+		{
+			continue;
+		}
+		FadeByParent.Add(Fade.Parent, Fade.Progress);
+		Participants.Add(Fade.Parent);
+		for (int32 Child = 0; Child < 4; ++Child)
+		{
+			Participants.Add(Fade.Parent.Child(Child));
+		}
+	}
+
+	for (const FPlanetTerrainNextNodeId& Participant : Participants)
+	{
+		const int32* SlotIndex = Resident.Find(Participant);
+		if (!SlotIndex)
+		{
+			continue;
+		}
+		FSlot& Slot = Slots[*SlotIndex];
 		if (!Slot.bInUse || !Slot.bShown || !Slot.Material)
 		{
 			continue;
@@ -1112,23 +1209,40 @@ void UPlanetTerrainNextComponent::ApplyLodFadeParams()
 			Role = PlanetTerrainNextLodFade::RoleParent();
 		}
 
+		if (bInFade && Slot.TransitionMaterial)
+		{
+			if (!Slot.bTransitionMaterialActive)
+			{
+				Slot.Mesh->SetMaterial(0, Slot.TransitionMaterial);
+				Slot.bTransitionMaterialActive = true;
+			}
+		}
+		else if (!bInFade && Slot.bTransitionMaterialActive && Slot.Material)
+		{
+			Slot.Mesh->SetMaterial(0, Slot.Material);
+			Slot.bTransitionMaterialActive = false;
+		}
+		UMaterialInstanceDynamic* FadeMaterial =
+			(bInFade && Slot.TransitionMaterial) ? Slot.TransitionMaterial : Slot.Material;
+		if (!FadeMaterial)
+		{
+			continue;
+		}
+
 		if (!FMath::IsNearlyEqual(Slot.LastLodFadeParam, Progress, 1.0e-4f))
 		{
-			Slot.Material->SetScalarParameterValue(TEXT("LodFade"), Progress);
+			FadeMaterial->SetScalarParameterValue(TEXT("LodFade"), Progress);
 			Slot.LastLodFadeParam = Progress;
 		}
 		if (!FMath::IsNearlyEqual(Slot.LastLodFadeRoleParam, Role, 1.0e-4f))
 		{
-			Slot.Material->SetScalarParameterValue(TEXT("LodFadeRole"), Role);
+			FadeMaterial->SetScalarParameterValue(TEXT("LodFadeRole"), Role);
 			Slot.LastLodFadeRoleParam = Role;
 		}
 
 		// Shadow policy: only the dominant side casts during a fade.
-		if (bInFade)
-		{
-			const bool bDominant = (Role < 0.5f) ? (Progress < 0.5f) : (Progress >= 0.5f);
-			Slot.Mesh->SetCastShadow(Settings.bCastShadow && bDominant);
-		}
+		const bool bDominant = !bInFade || ((Role < 0.5f) ? (Progress < 0.5f) : (Progress >= 0.5f));
+		ReconcileShadowState(Slot, bInFade, bDominant);
 	}
 }
 
@@ -1152,6 +1266,11 @@ void UPlanetTerrainNextComponent::BeginVisibleHandoff(FSlot& Slot)
 		{
 			Slot.Material->SetScalarParameterValue(TEXT("Morph"), 0.0f);
 			Slot.Material->SetScalarParameterValue(TEXT("MorphScaleCm"), 1.0f);
+			if (Slot.TransitionMaterial)
+			{
+				Slot.TransitionMaterial->SetScalarParameterValue(TEXT("Morph"), 0.0f);
+				Slot.TransitionMaterial->SetScalarParameterValue(TEXT("MorphScaleCm"), 1.0f);
+			}
 		}
 	}
 	else if (Slot.Material)
@@ -1160,11 +1279,22 @@ void UPlanetTerrainNextComponent::BeginVisibleHandoff(FSlot& Slot)
 		Slot.Material->SetScalarParameterValue(
 			TEXT("MorphScaleCm"),
 			static_cast<float>(FMath::Max(Slot.MaxAbsCoarseDeltaCm, 1.0)));
+		if (Slot.TransitionMaterial)
+		{
+			Slot.TransitionMaterial->SetScalarParameterValue(TEXT("Morph"), Settings.bEnableLegacyMorph ? 1.0f : 0.0f);
+			Slot.TransitionMaterial->SetScalarParameterValue(
+				TEXT("MorphScaleCm"), static_cast<float>(FMath::Max(Slot.MaxAbsCoarseDeltaCm, 1.0)));
+		}
 	}
 	if (Slot.Material)
 	{
 		Slot.Material->SetScalarParameterValue(TEXT("LodFade"), 0.0f);
 		Slot.Material->SetScalarParameterValue(TEXT("LodFadeRole"), 0.0f);
+		if (Slot.TransitionMaterial)
+		{
+			Slot.TransitionMaterial->SetScalarParameterValue(TEXT("LodFade"), 0.0f);
+			Slot.TransitionMaterial->SetScalarParameterValue(TEXT("LodFadeRole"), 0.0f);
+		}
 		Slot.LastLodFadeParam = 0.0f;
 		Slot.LastLodFadeRoleParam = 0.0f;
 	}
@@ -1288,6 +1418,10 @@ void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDraw
 		else if (Slot.Material && bMorphChanged)
 		{
 			Slot.Material->SetScalarParameterValue(TEXT("Morph"), Morph);
+			if (Slot.TransitionMaterial)
+			{
+				Slot.TransitionMaterial->SetScalarParameterValue(TEXT("Morph"), Morph);
+			}
 			++Updates;
 		}
 
@@ -1307,9 +1441,9 @@ void UPlanetTerrainNextComponent::HideAll()
 		if (Slot.Mesh)
 		{
 			Slot.Mesh->SetVisibility(false);
-			Slot.Mesh->SetCastShadow(false);
 		}
 		Slot.bShown = false;
+		ReconcileShadowState(Slot, false, false);
 	}
 	Drawn.Reset();
 	HandoffHoldFrames.Reset();
@@ -1327,7 +1461,12 @@ void UPlanetTerrainNextComponent::ApplyDebugColor(FSlot& Slot) const
 {
 	if (Slot.Material)
 	{
-		Slot.Material->SetVectorParameterValue(TEXT("Color"), DebugColorFor(Settings.DebugColor, Slot.Id, Slot.Morph));
+		const FLinearColor Color = DebugColorFor(Settings.DebugColor, Slot.Id, Slot.Morph);
+		Slot.Material->SetVectorParameterValue(TEXT("Color"), Color);
+		if (Slot.TransitionMaterial)
+		{
+			Slot.TransitionMaterial->SetVectorParameterValue(TEXT("Color"), Color);
+		}
 	}
 }
 
@@ -1344,6 +1483,11 @@ void UPlanetTerrainNextComponent::ApplyDetailParams(FSlot& Slot) const
 	const float V0 = static_cast<float>(Id.V0());
 	Slot.Material->SetScalarParameterValue(TEXT("DetailUVScale"), Scale);
 	Slot.Material->SetVectorParameterValue(TEXT("DetailUVOffset"), FLinearColor(U0, V0, 0.0f, 0.0f));
+	if (Slot.TransitionMaterial)
+	{
+		Slot.TransitionMaterial->SetScalarParameterValue(TEXT("DetailUVScale"), Scale);
+		Slot.TransitionMaterial->SetVectorParameterValue(TEXT("DetailUVOffset"), FLinearColor(U0, V0, 0.0f, 0.0f));
+	}
 
 	const bool bWantDetail = Settings.bDetailProjection
 		&& Settings.DebugColor == EPlanetTerrainNextDebugColor::Regolith
@@ -1355,12 +1499,25 @@ void UPlanetTerrainNextComponent::ApplyDetailParams(FSlot& Slot) const
 	if (Albedo)
 	{
 		Slot.Material->SetTextureParameterValue(TEXT("DetailAlbedo"), Albedo);
+		if (Slot.TransitionMaterial)
+		{
+			Slot.TransitionMaterial->SetTextureParameterValue(TEXT("DetailAlbedo"), Albedo);
+		}
 	}
 	if (Normal)
 	{
 		Slot.Material->SetTextureParameterValue(TEXT("DetailNormal"), Normal);
+		if (Slot.TransitionMaterial)
+		{
+			Slot.TransitionMaterial->SetTextureParameterValue(TEXT("DetailNormal"), Normal);
+		}
 	}
-	Slot.Material->SetScalarParameterValue(TEXT("DetailBlend"), (bWantDetail && Albedo && Normal) ? 1.0f : 0.0f);
+	const float DetailBlend = (bWantDetail && Albedo && Normal) ? 1.0f : 0.0f;
+	Slot.Material->SetScalarParameterValue(TEXT("DetailBlend"), DetailBlend);
+	if (Slot.TransitionMaterial)
+	{
+		Slot.TransitionMaterial->SetScalarParameterValue(TEXT("DetailBlend"), DetailBlend);
+	}
 }
 
 void UPlanetTerrainNextComponent::RefreshDetailParams()
@@ -1489,6 +1646,7 @@ void UPlanetTerrainNextComponent::ReleaseCollisionNode(const FPlanetTerrainNextN
 
 bool UPlanetTerrainNextComponent::CookCollisionNode(const FPlanetTerrainNextNodeId& Id)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_CookCollisionNode_GameThread);
 	if (!HeightField.IsValid() || !TileCache.IsValid() || CollisionResident.Contains(Id))
 	{
 		return false;
@@ -1504,10 +1662,8 @@ bool UPlanetTerrainNextComponent::CookCollisionNode(const FPlanetTerrainNextNode
 	const FPlanetTerrainNextHeightTile* Tile = TileCache->Find(TileId);
 	if (!Tile)
 	{
-		Tile = TileCache->GetOrBake(*HeightField, TileId, FrameCounter, IsPinned);
-	}
-	if (!Tile)
-	{
+		// Collision follows the async tile scheduler; never bake or load synchronously
+		// from the game thread while a camera is moving.
 		return false;
 	}
 
@@ -1578,6 +1734,24 @@ bool UPlanetTerrainNextComponent::CookCollisionNode(const FPlanetTerrainNextNode
 
 void UPlanetTerrainNextComponent::UpdateCollision(const FPlanetTerrainNextView& View)
 {
+	const double CameraAltitudeM = FMath::Max(0.0, View.CameraM.Length() - Descriptor.RadiusMeters);
+	if (CameraAltitudeM > Settings.CollisionMaxAltitudeM)
+	{
+		// High-altitude travel does not need local physics meshes. Release any old
+		// residency so descent starts from a bounded, intentional collision budget.
+		TArray<FPlanetTerrainNextNodeId> Released;
+		for (const TPair<FPlanetTerrainNextNodeId, int32>& Pair : CollisionResident)
+		{
+			Released.Add(Pair.Key);
+		}
+		for (const FPlanetTerrainNextNodeId& Id : Released)
+		{
+			ReleaseCollisionNode(Id);
+		}
+		CollisionManager.SetCookedThisFrame(0);
+		return;
+	}
+
 	FPlanetTerrainNextCollisionSettings CollisionSettings;
 	CollisionSettings.RadiusM = Settings.CollisionRadiusM;
 	CollisionSettings.TargetSpacingM = Settings.CollisionSpacingM;
@@ -1687,6 +1861,8 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	FrameStats.MeshSectionUpdates = 0;
 	FrameStats.MeshSectionClears = 0;
 	FrameStats.MeshResourceRebuilds = 0;
+	FrameStats.ShadowStateChanges = 0;
+	FrameStats.DeferredMissingTiles = 0;
 	FrameStats.CpuMorphUploads = 0;
 	FrameStats.CpuMorphUploadMs = 0.0;
 	Settings = FPlanetTerrainNextRuntimeSettings::Read();
@@ -1814,6 +1990,10 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	{
 		return;
 	}
+	// Refresh collision demand before scheduling so missing collision tiles enter
+	// the same bounded worker queue as visual refinement. The second call below
+	// cooks any tiles that complete during this frame.
+	UpdateCollision(View);
 
 	auto IsReady = [this](const FPlanetTerrainNextNodeId& Id)
 	{
@@ -1840,6 +2020,26 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		FrameCounter,
 		Settings.PrefetchPerFrame,
 		Desired);
+	for (const FPlanetTerrainNextNodeId& CollisionId : CollisionManager.GetDesired())
+	{
+		if (CollisionResident.Contains(CollisionId))
+		{
+			continue;
+		}
+		const FPlanetTerrainNextTileId CollisionTileId = MakeTileId(CollisionId);
+		if (TileCache->Find(CollisionTileId))
+		{
+			continue;
+		}
+		FPlanetTerrainNextTileRequest CollisionRequest;
+		CollisionRequest.NodeId = CollisionId;
+		CollisionRequest.TileId = CollisionTileId;
+		CollisionRequest.Class = EPlanetTerrainNextRequestClass::Coverage;
+		CollisionRequest.bRequiredForCoverage = true;
+		CollisionRequest.Priority = 4.0e13 - static_cast<double>(CollisionId.Level);
+		CollisionRequest.DeadlineFrame = FrameCounter + 1;
+		Desired.Add(CollisionRequest);
+	}
 	Scheduler->SetDesired(Desired);
 	Scheduler->Pump(HeightField);
 	auto IsPinned = [this](const FPlanetTerrainNextTileId& Key)
@@ -1854,13 +2054,14 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	if (!Settings.bPauseBuilds)
 	{
 		const double BuildStart = FPlatformTime::Seconds();
+		const int32 MaxCommits = FMath::Min(Settings.TileUploadsPerFrame, Settings.MeshCommitsPerFrame);
 		for (const FPlanetTerrainNextPendingBuild& Request : Pending)
 		{
-			if (Built >= Settings.TileUploadsPerFrame)
+			if (Built >= MaxCommits)
 			{
 				break;
 			}
-			if (Built > 0 && (FPlatformTime::Seconds() - BuildStart) * 1000.0 >= Settings.BuildBudgetMs)
+			if ((FPlatformTime::Seconds() - BuildStart) * 1000.0 >= Settings.BuildBudgetMs)
 			{
 				break;
 			}
@@ -2032,8 +2233,8 @@ bool UPlanetTerrainNextComponent::BuildDiagNode(
 	}
 
 	Slot.Mesh->SetVisibility(true);
-	Slot.Mesh->SetCastShadow(false);
 	Slot.bShown = true;
+	ReconcileShadowState(Slot, true, false); // diagnostic meshes never cast terrain shadows
 	Resident.Add(Id, SlotIndex);
 	Drawn.Add(Id);
 	return true;

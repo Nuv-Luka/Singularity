@@ -16,10 +16,17 @@ class UMaterialInterface;
  */
 namespace PlanetTerrainNextMorphMaterial
 {
-inline constexpr int32 MaterialFormatVersion = 5;
+inline constexpr int32 MaterialFormatVersion = 6;
 
 inline constexpr TCHAR Path[] =
 	TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v5.M_PlanetTerrainNextPatch_v5");
+inline constexpr TCHAR TransitionPath[] =
+	TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v5.M_PlanetTerrainNextPatch_v5");
+inline constexpr TCHAR StablePath[] =
+	TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v6_Stable.M_PlanetTerrainNextPatch_v6_Stable");
 
+/** Legacy name retained as the transition material accessor. */
 SINGULARITYPLANETTERRAINNEXT_API UMaterialInterface* GetOrCreate();
+SINGULARITYPLANETTERRAINNEXT_API UMaterialInterface* GetOrCreateTransition();
+SINGULARITYPLANETTERRAINNEXT_API UMaterialInterface* GetOrCreateStable();
 }

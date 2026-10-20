@@ -32,6 +32,8 @@ struct FPlanetTerrainNextFrameStats
 	int32 Pending = 0;
 	int32 BuiltThisFrame = 0;
 	int32 VisibilityChanges = 0;
+	int32 ShadowStateChanges = 0;
+	int32 DeferredMissingTiles = 0;
 	int32 Splits = 0;
 	int32 Merges = 0;
 	int32 BudgetBlocked = 0;
@@ -176,6 +178,7 @@ private:
 	{
 		TObjectPtr<UProceduralMeshComponent> Mesh = nullptr;
 		TObjectPtr<UMaterialInstanceDynamic> Material = nullptr;
+		TObjectPtr<UMaterialInstanceDynamic> TransitionMaterial = nullptr;
 		FPlanetTerrainNextNodeId Id;
 		FPlanetTerrainNextTileId TileId;
 		int32 GpuSlot = INDEX_NONE;
@@ -200,6 +203,8 @@ private:
 		bool bInUse = false;
 		bool bHasSection = false;
 		bool bShown = false;
+		bool bAppliedCastShadow = false;
+		bool bTransitionMaterialActive = false;
 		/** Matches PlanetTerrainNextPatch::GetIndexBufferVersion() at last Create. */
 		int32 IndexBufferVersion = -1;
 		int32 SectionVertexCount = 0;
@@ -224,6 +229,7 @@ private:
 	void ApplyDrawSetExclusive(TSet<FPlanetTerrainNextNodeId>& Next);
 	void ApplyDrawSetDithered(const TSet<FPlanetTerrainNextNodeId>& Desired, float DeltaSeconds);
 	void SyncVisibilityToRenderSet(const TSet<FPlanetTerrainNextNodeId>& Render);
+	void ReconcileShadowState(FSlot& Slot, bool bInFade, bool bDominant);
 	void ApplyLodFadeParams();
 	bool CheckDrawCoverage(const TArray<FPlanetTerrainNextDrawItem>& DrawSet) const;
 	/** Morph only patches that are actually shown after handoff (R9.2). */
@@ -265,6 +271,8 @@ private:
 	TArray<TObjectPtr<UProceduralMeshComponent>> SlotMeshes;
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UMaterialInstanceDynamic>> SlotMaterials;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> SlotTransitionMaterials;
 	/** Collision-only meshes (invisible, QueryAndPhysics). Independent of visual LOD. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UProceduralMeshComponent>> CollisionMeshes;
@@ -296,6 +304,8 @@ private:
 	EPlanetTerrainNextDebugColor AppliedDebugColor = EPlanetTerrainNextDebugColor::Regolith;
 	bool bInitialized = false;
 	bool bSuspended = false;
+	/** Only root coverage may synchronously bake during InitializeTerrain. */
+	bool bAllowSynchronousBootstrap = false;
 	/** Last frame's DetailProjection CVar — detect toggles for MID refresh. */
 	bool bDetailProjectionLive = false;
 	/** R10.1: last diag rebuild key; INDEX_NONE when diag off. */

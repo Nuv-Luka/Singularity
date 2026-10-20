@@ -2,6 +2,24 @@
 
 Status: measurement stage in progress. No new production optimization has been accepted from this guide yet.
 
+## R10 recovery milestone: Game-thread stall removal
+
+The descent evidence is **[USER-REPORTED]**: Frame, Game and Input spike together while GPU timings do not. The first implementation milestone therefore targets synchronous Game-thread work before material or shader changes.
+
+- `BuildNode()` now permits `GetOrBake()` only during the explicit six-root `InitializeTerrain()` bootstrap. Runtime refinement consumes resident CPU tiles and leaves the existing parent covering until asynchronous scheduler completion.
+- `CookCollisionNode()` no longer bakes or loads missing height tiles synchronously. Collision demand is added to the bounded tile scheduler, then cooked only after a tile is resident. Local collision is released above the configurable `CollisionMaxAltitudeM` threshold (10 km default).
+- `TileCache::Insert()` now places worker results in memory immediately and queues bounded, deduplicated persistence jobs. Serialization, pruning and file writes run on the disk worker. The synchronous disk path remains limited to bootstrap `GetOrBake()` compatibility.
+- Mesh commits are bounded by `MeshCommitsPerFrame` and the existing build-time budget. Unreal Insights scopes now distinguish BuildNode, cache lookup/insert, background disk save/prune, collision cook and mesh-section upload work.
+- Shadow writes use one cached reconciliation path, and idle fade processing only visits active transition participants.
+- Terrain material generation now exposes a stable v6 opaque, single-sided, WPO-free variant and retains v5 as the masked transition variant. Reusable slots keep both MIDs; only active fades switch to the transition MID, then restore the stable MID at completion. Detail, color and morph parameters are synchronized between both variants.
+- `singularity.TerrainNext.EmergencyMode` is an opt-in startup preset that disables terrain shadows, dithered transitions, disk cache writes and collision cooks, and caps patches at 64 while retaining detail projection. It defaults off.
+
+This milestone preserves pooled sections, corrected L1/L2 geometry, quadtree coverage, geological detail projection and the existing fade state machine. It is not a performance recovery claim until a responsive build can be profiled again.
+
+For an editor that cannot reach the console, the recovery preset can be supplied before startup with `-singularity.TerrainNext.EmergencyMode=1` (or placed in a local startup configuration). It defaults to off and should be removed for normal visual/performance comparisons.
+
+Validation for this milestone: `SingularityEditor Win64 Development` succeeded; R10 geometry/fade automation passed 4/4 in `Saved/Logs/PlanetTerrainNextR10RecoveryMaterialTests.log`; the earlier R9 detail determinism and R8 disk-cache tests also passed after the Game-thread changes.
+
 ## Pinned revisions
 
 - Baseline `origin/main`: `76199c35b57b0e08fda5640ddb2cce01e0de69f2`

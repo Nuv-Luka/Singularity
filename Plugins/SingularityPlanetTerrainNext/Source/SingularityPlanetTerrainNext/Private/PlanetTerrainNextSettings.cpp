@@ -119,6 +119,11 @@ TAutoConsoleVariable<int32> CVarTileUploadsPerFrame(
 	16,
 	TEXT("Max new GPU atlas uploads (and associated mesh builds) per frame."));
 
+TAutoConsoleVariable<int32> CVarMeshCommitsPerFrame(
+	TEXT("singularity.TerrainNext.MeshCommitsPerFrame"),
+	4,
+	TEXT("Maximum ProceduralMeshComponent section commits per frame during runtime refinement."));
+
 TAutoConsoleVariable<int32> CVarMaxBakeWorkers(
 	TEXT("singularity.TerrainNext.MaxBakeWorkers"),
 	4,
@@ -138,6 +143,11 @@ TAutoConsoleVariable<float> CVarCollisionRadius(
 	TEXT("singularity.TerrainNext.CollisionRadiusM"),
 	200.0f,
 	TEXT("Geodesic metres of local collision coverage around the camera/vehicle."));
+
+TAutoConsoleVariable<float> CVarCollisionMaxAltitude(
+	TEXT("singularity.TerrainNext.CollisionMaxAltitudeM"),
+	10000.0f,
+	TEXT("Maximum altitude for local collision residency; visual terrain streaming is unaffected."));
 
 TAutoConsoleVariable<float> CVarCollisionSpacing(
 	TEXT("singularity.TerrainNext.CollisionSpacingM"),
@@ -194,6 +204,11 @@ TAutoConsoleVariable<bool> CVarEnableDitheredLOD(
 	true,
 	TEXT("R10.2: complementary dithered parent/child LOD crossfade (masked material)."));
 
+TAutoConsoleVariable<bool> CVarEmergencyMode(
+	TEXT("singularity.TerrainNext.EmergencyMode"),
+	false,
+	TEXT("Opt-in recovery preset: disables terrain shadows, dither, disk writes and collision cooks; caps patches."));
+
 TAutoConsoleVariable<bool> CVarEnableLegacyMorph(
 	TEXT("singularity.TerrainNext.EnableLegacyMorph"),
 	false,
@@ -246,10 +261,12 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.bDiskCache = CVarDiskCache.GetValueOnGameThread();
 	Out.DiskCacheMaxMB = FMath::Clamp(CVarDiskCacheMaxMB.GetValueOnGameThread(), 0, 1024 * 1024);
 	Out.TileUploadsPerFrame = FMath::Clamp(CVarTileUploadsPerFrame.GetValueOnGameThread(), 1, 256);
+	Out.MeshCommitsPerFrame = FMath::Clamp(CVarMeshCommitsPerFrame.GetValueOnGameThread(), 1, 64);
 	Out.MaxBakeWorkers = FMath::Clamp(CVarMaxBakeWorkers.GetValueOnGameThread(), 1, 16);
 	Out.MaxBakeQueue = FMath::Clamp(CVarMaxBakeQueue.GetValueOnGameThread(), 8, 4096);
 	Out.PrefetchPerFrame = FMath::Clamp(CVarPrefetchPerFrame.GetValueOnGameThread(), 0, 64);
 	Out.CollisionRadiusM = FMath::Clamp(static_cast<double>(CVarCollisionRadius.GetValueOnGameThread()), 10.0, 5000.0);
+	Out.CollisionMaxAltitudeM = FMath::Clamp(static_cast<double>(CVarCollisionMaxAltitude.GetValueOnGameThread()), 100.0, 1000000.0);
 	Out.CollisionSpacingM = FMath::Clamp(static_cast<double>(CVarCollisionSpacing.GetValueOnGameThread()), 0.5, 50.0);
 	Out.CollisionMaxPatches = FMath::Clamp(CVarCollisionMaxPatches.GetValueOnGameThread(), 1, 128);
 	Out.CollisionCooksPerFrame = FMath::Clamp(CVarCollisionCooksPerFrame.GetValueOnGameThread(), 0, 16);
@@ -265,6 +282,15 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.bEnableLegacyMorph = CVarEnableLegacyMorph.GetValueOnGameThread();
 	Out.LodTransitionSeconds = FMath::Clamp(CVarLodTransitionSeconds.GetValueOnGameThread(), 0.05f, 5.0f);
 	Out.MaxConcurrentTransitionGroups = FMath::Clamp(CVarMaxConcurrentTransitionGroups.GetValueOnGameThread(), 1, 128);
+	Out.bEmergencyMode = CVarEmergencyMode.GetValueOnGameThread();
+	if (Out.bEmergencyMode)
+	{
+		Out.bCastShadow = false;
+		Out.bEnableDitheredLOD = false;
+		Out.bDiskCache = false;
+		Out.CollisionCooksPerFrame = 0;
+		Out.Lod.MaxNodes = FMath::Min(Out.Lod.MaxNodes, 64);
+	}
 	Out.bPerfCapture = CVarPerfCapture.GetValueOnGameThread();
 	Out.PerfScenario = CVarPerfScenario.GetValueOnGameThread();
 	return Out;

@@ -32,15 +32,15 @@ namespace PlanetTerrainNextMorphMaterial
 {
 namespace
 {
-UMaterialInterface* LoadExisting()
+UMaterialInterface* LoadExisting(const TCHAR* InPath)
 {
-	return Cast<UMaterialInterface>(FSoftObjectPath(Path).TryLoad());
+	return Cast<UMaterialInterface>(FSoftObjectPath(InPath).TryLoad());
 }
 
 #if WITH_EDITOR
-UMaterialInterface* CreateAndSave()
+UMaterialInterface* CreateAndSave(const TCHAR* InPackagePath, const TCHAR* InAssetName, bool bStable)
 {
-	const FString PackagePath = TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v5");
+	const FString PackagePath(InPackagePath);
 	UPackage* Package = CreatePackage(*PackagePath);
 	if (!Package)
 	{
@@ -52,7 +52,7 @@ UMaterialInterface* CreateAndSave()
 	UMaterial* Material = Cast<UMaterial>(Factory->FactoryCreateNew(
 		UMaterial::StaticClass(),
 		Package,
-		TEXT("M_PlanetTerrainNextPatch_v5"),
+		InAssetName,
 		RF_Public | RF_Standalone | RF_Transactional,
 		nullptr,
 		GWarn));
@@ -62,10 +62,11 @@ UMaterialInterface* CreateAndSave()
 		return nullptr;
 	}
 
-	// R10.2: masked dither (depth writes, no translucency pass).
-	Material->BlendMode = BLEND_Masked;
+	// Stable patches are genuinely opaque and WPO-free. The transition variant
+	// retains masked dither and the legacy WPO graph for active fades/morphing.
+	Material->BlendMode = bStable ? BLEND_Opaque : BLEND_Masked;
 	Material->SetShadingModel(MSM_DefaultLit);
-	Material->TwoSided = true;
+	Material->TwoSided = !bStable;
 	Material->SetMaterialUsage(MATUSAGE_StaticMesh);
 
 	auto* Morph = Cast<UMaterialExpressionScalarParameter>(
@@ -232,8 +233,11 @@ UMaterialInterface* CreateAndSave()
 
 	UMaterialEditingLibrary::ConnectMaterialProperty(BaseColor, TEXT(""), MP_BaseColor);
 	UMaterialEditingLibrary::ConnectMaterialProperty(NormalLerp, TEXT(""), MP_Normal);
-	UMaterialEditingLibrary::ConnectMaterialProperty(ToWorld, TEXT(""), MP_WorldPositionOffset);
-	UMaterialEditingLibrary::ConnectMaterialProperty(OpacitySource, TEXT(""), MP_OpacityMask);
+	if (!bStable)
+	{
+		UMaterialEditingLibrary::ConnectMaterialProperty(ToWorld, TEXT(""), MP_WorldPositionOffset);
+		UMaterialEditingLibrary::ConnectMaterialProperty(OpacitySource, TEXT(""), MP_OpacityMask);
+	}
 	UMaterialEditingLibrary::LayoutMaterialExpressions(Material);
 	UMaterialEditingLibrary::RecompileMaterial(Material);
 
@@ -246,36 +250,65 @@ UMaterialInterface* CreateAndSave()
 	if (!UPackage::SavePackage(Package, Material, *PackageFilename, SaveArgs))
 	{
 		UE_LOG(LogPlanetTerrainNext, Warning,
-			TEXT("Morph material v%d created in memory but save to %s failed. PIE still works this session."),
+			TEXT("Terrain material v%d created in memory but save to %s failed. PIE still works this session."),
 			MaterialFormatVersion, *PackageFilename);
 	}
 	else
 	{
-		UE_LOG(LogPlanetTerrainNext, Log, TEXT("Created morph material v%d at %s"), MaterialFormatVersion, *PackageFilename);
+		UE_LOG(LogPlanetTerrainNext, Log, TEXT("Created terrain material v%d at %s"), MaterialFormatVersion, *PackageFilename);
 	}
 	return Material;
 }
 #endif
 } // namespace
 
-UMaterialInterface* GetOrCreate()
+UMaterialInterface* GetOrCreateTransition()
 {
-	if (UMaterialInterface* Existing = LoadExisting())
+	if (UMaterialInterface* Existing = LoadExisting(TransitionPath))
 	{
 		return Existing;
 	}
 #if WITH_EDITOR
 	if (GIsEditor)
 	{
-		if (UMaterialInterface* Created = CreateAndSave())
+		if (UMaterialInterface* Created = CreateAndSave(
+			TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v5"),
+			TEXT("M_PlanetTerrainNextPatch_v5"), false))
 		{
 			return Created;
 		}
 	}
 #endif
 	UE_LOG(LogPlanetTerrainNext, Warning,
-		TEXT("Morph material missing at %s — falling back to BasicShapeMaterial."),
-		Path);
+		TEXT("Transition material missing at %s — falling back to BasicShapeMaterial."),
+		TransitionPath);
 	return LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+}
+
+UMaterialInterface* GetOrCreateStable()
+{
+	if (UMaterialInterface* Existing = LoadExisting(StablePath))
+	{
+		return Existing;
+	}
+#if WITH_EDITOR
+	if (GIsEditor)
+	{
+		if (UMaterialInterface* Created = CreateAndSave(
+			TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v6_Stable"),
+			TEXT("M_PlanetTerrainNextPatch_v6_Stable"), true))
+		{
+			return Created;
+		}
+	}
+#endif
+	UE_LOG(LogPlanetTerrainNext, Warning,
+		TEXT("Stable terrain material missing at %s — using transition material."), StablePath);
+	return GetOrCreateTransition();
+}
+
+UMaterialInterface* GetOrCreate()
+{
+	return GetOrCreateTransition();
 }
 }

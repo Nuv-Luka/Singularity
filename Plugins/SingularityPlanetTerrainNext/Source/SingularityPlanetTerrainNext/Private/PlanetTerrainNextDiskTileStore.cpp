@@ -2,10 +2,12 @@
 
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
+#include "Async/Async.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 namespace
 {
@@ -53,6 +55,131 @@ FString FPlanetTerrainNextDiskTileStore::DefaultRootDirectory()
 FPlanetTerrainNextDiskTileStore::FPlanetTerrainNextDiskTileStore(const FString& InRootDirectory)
 	: RootDirectory(InRootDirectory.IsEmpty() ? DefaultRootDirectory() : InRootDirectory)
 {
+}
+
+FPlanetTerrainNextDiskTileStore::~FPlanetTerrainNextDiskTileStore()
+{
+	Shutdown();
+}
+
+void FPlanetTerrainNextDiskTileStore::SetEnabled(bool bInEnabled)
+{
+	FScopeLock Lock(&Mutex);
+	bEnabled = bInEnabled;
+}
+
+bool FPlanetTerrainNextDiskTileStore::IsEnabled() const
+{
+	FScopeLock Lock(&Mutex);
+	return bEnabled;
+}
+
+void FPlanetTerrainNextDiskTileStore::SetMaxBytes(int64 InMaxBytes)
+{
+	FScopeLock Lock(&Mutex);
+	MaxBytes = FMath::Max<int64>(InMaxBytes, 0);
+}
+
+int64 FPlanetTerrainNextDiskTileStore::GetMaxBytes() const
+{
+	FScopeLock Lock(&Mutex);
+	return MaxBytes;
+}
+
+void FPlanetTerrainNextDiskTileStore::Shutdown()
+{
+	FScopeLock Lock(&Mutex);
+	bShuttingDown = true;
+	PendingSaves.Reset();
+	PendingSaveIds.Reset();
+}
+
+void FPlanetTerrainNextDiskTileStore::EnqueueSave(const FPlanetTerrainNextHeightTile& Tile)
+{
+	if (!Tile.IsValid())
+	{
+		return;
+	}
+
+	bool bStartWorker = false;
+	{
+		FScopeLock Lock(&Mutex);
+		if (!bEnabled || bShuttingDown)
+		{
+			++Stats.SaveSkipped;
+			return;
+		}
+		if (PendingSaveIds.Contains(Tile.Id))
+		{
+			return;
+		}
+		if (PendingSaves.Num() >= MaxPendingSaves)
+		{
+			++Stats.SaveSkipped;
+			return;
+		}
+		TSharedPtr<FPendingSave> Pending = MakeShared<FPendingSave>();
+		Pending->Tile = Tile;
+		PendingSaves.Add(MoveTemp(Pending));
+		PendingSaveIds.Add(Tile.Id);
+		if (!bSaveTaskRunning)
+		{
+			bSaveTaskRunning = true;
+			bStartWorker = true;
+		}
+	}
+
+	if (bStartWorker)
+	{
+		const TSharedPtr<FPlanetTerrainNextDiskTileStore> Self = AsShared();
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [Self]()
+		{
+			Self->PumpAsyncSaves();
+		});
+	}
+}
+
+void FPlanetTerrainNextDiskTileStore::PumpAsyncSaves()
+{
+	constexpr int32 SavesPerTask = 4;
+	for (int32 Index = 0; Index < SavesPerTask; ++Index)
+	{
+		TSharedPtr<FPendingSave> Pending;
+		{
+			FScopeLock Lock(&Mutex);
+			if (PendingSaves.Num() == 0)
+			{
+				bSaveTaskRunning = false;
+				return;
+			}
+			Pending = PendingSaves[0];
+			PendingSaves.RemoveAt(0, 1, EAllowShrinking::No);
+		}
+		if (Pending.IsValid())
+		{
+			Save(Pending->Tile);
+			FScopeLock Lock(&Mutex);
+			PendingSaveIds.Remove(Pending->Tile.Id);
+		}
+	}
+
+	bool bMore = false;
+	{
+		FScopeLock Lock(&Mutex);
+		bMore = PendingSaves.Num() > 0;
+		if (!bMore)
+		{
+			bSaveTaskRunning = false;
+		}
+	}
+	if (bMore)
+	{
+		const TSharedPtr<FPlanetTerrainNextDiskTileStore> Self = AsShared();
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [Self]()
+		{
+			Self->PumpAsyncSaves();
+		});
+	}
 }
 
 void FPlanetTerrainNextDiskTileStore::SetRootDirectory(const FString& InRoot)
@@ -108,6 +235,7 @@ int64 FPlanetTerrainNextDiskTileStore::EstimateDirectoryBytes() const
 
 void FPlanetTerrainNextDiskTileStore::PruneToBudget(int64 NeededBytes)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_DiskStore_PruneToBudget);
 	if (MaxBytes <= 0)
 	{
 		return;
@@ -230,6 +358,7 @@ bool FPlanetTerrainNextDiskTileStore::TryLoad(const FPlanetTerrainNextTileId& Id
 
 bool FPlanetTerrainNextDiskTileStore::Save(const FPlanetTerrainNextHeightTile& Tile)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_DiskStore_Save_Background);
 	FScopeLock Lock(&Mutex);
 	if (!bEnabled || !Tile.IsValid())
 	{

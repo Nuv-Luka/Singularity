@@ -3,6 +3,7 @@
 #include "PlanetTerrainNextDiskTileStore.h"
 #include "PlanetTerrainNextHeightField.h"
 #include "HAL/PlatformTime.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 FPlanetTerrainNextTileCache::FPlanetTerrainNextTileCache(int32 InMaxEntries)
 	: MaxEntries(FMath::Max(InMaxEntries, 1))
@@ -118,6 +119,8 @@ void FPlanetTerrainNextTileCache::WriteThroughDisk(const FPlanetTerrainNextHeigh
 	{
 		return;
 	}
+	// Bootstrap-only path: initial roots may persist synchronously while the
+	// runtime refinement path below always uses the asynchronous queue.
 	if (Disk->Save(Tile))
 	{
 		++Stats.DiskWrites;
@@ -130,6 +133,7 @@ const FPlanetTerrainNextHeightTile* FPlanetTerrainNextTileCache::GetOrBake(
 	int64 Frame,
 	TFunctionRef<bool(const FPlanetTerrainNextTileId&)> IsPinned)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_TileCache_GetOrBake_GameThread);
 	if (FEntry* Found = Entries.Find(Id))
 	{
 		Found->LastUsedFrame = Frame;
@@ -182,6 +186,7 @@ bool FPlanetTerrainNextTileCache::Insert(
 	int64 Frame,
 	TFunctionRef<bool(const FPlanetTerrainNextTileId&)> IsPinned)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_TileCache_Insert_GameThread);
 	if (!Tile.IsValid())
 	{
 		return false;
@@ -191,7 +196,11 @@ bool FPlanetTerrainNextTileCache::Insert(
 	{
 		Found->LastUsedFrame = Frame;
 		Found->Tile = MoveTemp(Tile);
-		WriteThroughDisk(Found->Tile);
+		if (Disk.IsValid() && Disk->IsEnabled())
+		{
+			Disk->EnqueueSave(Found->Tile);
+			++Stats.DiskWrites;
+		}
 		++Stats.Hits;
 		Stats.Entries = Entries.Num();
 		return true;
@@ -209,7 +218,11 @@ bool FPlanetTerrainNextTileCache::Insert(
 		return false;
 	}
 
-	WriteThroughDisk(Tile);
+	if (Disk.IsValid() && Disk->IsEnabled())
+	{
+		Disk->EnqueueSave(Tile);
+		++Stats.DiskWrites;
+	}
 
 	FEntry Entry;
 	Entry.LastUsedFrame = Frame;
