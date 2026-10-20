@@ -38,6 +38,8 @@ The first live telemetry file was successfully written to `Saved/Logs/PlanetTerr
 
 This is candidate-only evidence. It does not provide the required Game/Draw/RHI/GPU stat distributions, does not cover approach/descent/traversal/ascent, and is not an A/B recovery claim. Repeat each scenario for a 30–60 second steady window and capture the matching baseline before assigning a regression cause.
 
+The next candidate sample, `S1_OrbitalApproach_Run1`, contains 493 rows (about 8.2 seconds). Its frame-delta median is **16.669 ms**, P95 **35.308 ms**, and P99 **400 ms**, with 22 frames at or above 100 ms. Average drawn patches rose to **6.4**; the sample recorded **94 mesh creations**, 0 mesh updates, 0 active CPU-morph patches, and 0 detail uploads. This indicates that approach activity is causing pooled-section creation work, but the short sample and missing engine stat overlays still prevent attribution.
+
 The current renderer has VSM enabled, masked/two-sided v5 transition material, opaque v4 asset, dithered LOD enabled, legacy CPU morph disabled, and topology-compatible PMC reuse enabled by default. See `PTN_R10_Regression_Inventory.md` for the complete source inventory.
 
 ## Safeguard validation after telemetry change
