@@ -9,6 +9,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformTime.h"
@@ -101,6 +102,20 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 	Scheduler = MakeShared<FPlanetTerrainNextTileScheduler>();
 	Scheduler->Reset(HeightField->GetIdentityHash());
 	Scheduler->SetBudgets(Settings.MaxBakeWorkers, Settings.MaxBakeQueue);
+	DetailAlbedoTextures.SetNum(6);
+	DetailNormalTextures.SetNum(6);
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		DetailAlbedoTextures[Face] = nullptr;
+		DetailNormalTextures[Face] = nullptr;
+	}
+	DetailStore = MakeShared<FPlanetTerrainNextDetailStore>();
+	DetailStore->SetEnabled(Settings.bDetailProjection);
+	DetailStore->SetBudgets(Settings.DetailMaxConcurrentBakes, Settings.DetailUploadsPerFrame);
+	DetailStore->Reset(
+		Descriptor.PlanetId,
+		HeightField->GetIdentityHash(),
+		static_cast<uint16>(Settings.DetailResolution));
 	CollisionManager.Reset();
 	{
 		FPlanetTerrainNextCollisionSettings CollisionSettings;
@@ -132,13 +147,15 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 	ApplyMorph(DrawSet, 1.0f / 60.0f);
 
 	UE_LOG(LogPlanetTerrainNext, Log,
-		TEXT("TerrainNext R6 init planet=%lld R=%.1f km heights=[%.0f, %.0f] m roots=%d gpuSlots=%d in %.1f ms GE[0]=%.0f m GE[17]=%.2f m"),
+		TEXT("TerrainNext R9.3 init planet=%lld R=%.1f km heights=[%.0f, %.0f] m roots=%d gpuSlots=%d detail=%dx%d in %.1f ms GE[0]=%.0f m GE[17]=%.2f m"),
 		Descriptor.PlanetId,
 		Descriptor.RadiusMeters / 1000.0,
 		HeightField->GetMinHeightMeters(),
 		HeightField->GetMaxHeightMeters(),
 		Resident.Num(),
 		GpuPool->GetCapacity(),
+		Settings.bDetailProjection ? Settings.DetailResolution : 0,
+		Settings.bDetailProjection ? Settings.DetailResolution : 0,
 		(FPlatformTime::Seconds() - Start) * 1000.0,
 		GeometricErrorByLevel[0],
 		GeometricErrorByLevel[17]);
@@ -188,6 +205,14 @@ void UPlanetTerrainNextComponent::ShutdownTerrain()
 	CollisionResident.Reset();
 	CollisionManager.Reset();
 	Scheduler.Reset();
+	if (DetailStore.IsValid())
+	{
+		DetailStore->Shutdown();
+	}
+	DetailStore.Reset();
+	DetailAlbedoTextures.Reset();
+	DetailNormalTextures.Reset();
+	bDetailProjectionLive = false;
 	if (TileCache.IsValid())
 	{
 		TileCache->SetDiskStore(nullptr);
@@ -431,6 +456,14 @@ void UPlanetTerrainNextComponent::ReleaseNode(const FPlanetTerrainNextNodeId& Id
 	}
 	Slot.bShown = false;
 	Slot.bInUse = false;
+	Slot.bCpuMorph = false;
+	Slot.FineCm.Reset();
+	Slot.CoarseCm.Reset();
+	Slot.FineNormals.Reset();
+	Slot.CoarseNormals.Reset();
+	Slot.Tangents.Reset();
+	Slot.BaseUVs.Reset();
+	Slot.BaseColors.Reset();
 	Drawn.Remove(Id);
 	FreeSlots.Add(SlotIndex);
 }
@@ -484,12 +517,30 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 	}
 
 	const double Start = FPlatformTime::Seconds();
-	const double SkirtDepth = PlanetTerrainNextPatch::RecommendedSkirtDepthM(
-		GeometricErrorByLevel[FMath::Clamp(Id.Level - 2, 0, MaxTreeLevel)],
-		PlanetTerrainNextPatch::VertexSpacingMeters(Descriptor.RadiusMeters, Id.Level));
+	// Skirts off on CPU-morph LODs (L0–L2): curtains read as inverted checkerboards from orbit.
+	const bool bLikelyCpuMorph = !Settings.bMorphWpoEnabled
+		|| Id.Level <= Settings.MorphCpuMaxLevel;
+	const double SkirtDepth = (Settings.bSkirtsEnabled && !bLikelyCpuMorph)
+		? PlanetTerrainNextPatch::RecommendedSkirtDepthM(
+			GeometricErrorByLevel[FMath::Clamp(Id.Level - 2, 0, MaxTreeLevel)],
+			PlanetTerrainNextPatch::VertexSpacingMeters(Descriptor.RadiusMeters, Id.Level))
+		: 0.0;
 
 	FPlanetTerrainNextPatchData Patch;
 	PlanetTerrainNextPatch::BuildFromTile(*HeightField, *Tile, SkirtDepth, Patch);
+
+	// F16 UV×MorphScaleCm quantization: ULP~1e-3 near 1 → Scale>1000cm ≈ >1cm vertex error.
+	// Raw cm packing also overflows F16 at 65504. Either case → CPU morph (true WPO disconnect).
+	const bool bCpuMorph = !Settings.bMorphWpoEnabled
+		|| Id.Level <= Settings.MorphCpuMaxLevel
+		|| Patch.MaxAbsCoarseDeltaCm > static_cast<double>(Settings.MorphGpuMaxScaleCm);
+
+	if (Patch.MaxAbsCoarseDeltaCm > 65504.0)
+	{
+		UE_LOG(LogPlanetTerrainNext, Verbose,
+			TEXT("Morph Δmax=%.0f cm exceeds F16 max (65504) on %s — CPU morph=%d"),
+			Patch.MaxAbsCoarseDeltaCm, *Id.ToString(), bCpuMorph ? 1 : 0);
+	}
 
 	FSlot& Slot = Slots[SlotIndex];
 	Slot.Id = Id;
@@ -499,12 +550,18 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 	Slot.Morph = 1.0f; // Parent-compatible until reveal + smooth open toward PE target.
 	Slot.MorphReveal = 0.0f;
 	Slot.MaxAbsCoarseDeltaCm = Patch.MaxAbsCoarseDeltaCm;
+	Slot.bCpuMorph = bCpuMorph;
 	UploadPatch(Slot, Patch);
 	if (Slot.Material)
 	{
-		Slot.Material->SetScalarParameterValue(TEXT("Morph"), Slot.Morph);
+		// CPU morph: UV deltas are 0 and Morph scalar must stay 0 so WPO cannot NaN.
+		Slot.Material->SetScalarParameterValue(TEXT("Morph"), Slot.bCpuMorph ? 0.0f : Slot.Morph);
+		Slot.Material->SetScalarParameterValue(
+			TEXT("MorphScaleCm"),
+			Slot.bCpuMorph ? 1.0f : static_cast<float>(FMath::Max(Slot.MaxAbsCoarseDeltaCm, 1.0)));
 	}
 	ApplyDebugColor(Slot);
+	ApplyDetailParams(Slot);
 	Resident.Add(Id, SlotIndex);
 	Quadtree.SetNodeHeightRange(Id, Patch.MinHeightM, Patch.MaxHeightM);
 	GpuPool->Pin(TileId, EPlanetTerrainNextPinReason::Coverage);
@@ -515,27 +572,136 @@ bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
 
 void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainNextPatchData& Patch)
 {
-	TArray<FProcMeshTangent> Tangents;
-	Tangents.Reserve(Patch.Tangents.Num());
+	Slot.Mesh->SetRelativeLocation(Patch.OriginM * PlanetTerrainNext::CmPerMeter);
+
+	Slot.Tangents.Reset();
+	Slot.Tangents.Reserve(Patch.Tangents.Num());
 	for (const FVector& Tangent : Patch.Tangents)
+	{
+		Slot.Tangents.Add(Tangent);
+	}
+	Slot.BaseUVs = Patch.UVs;
+	Slot.BaseColors = Patch.VertexColors;
+
+	if (Slot.bCpuMorph)
+	{
+		Slot.FineCm = Patch.VerticesCm;
+		Slot.CoarseCm = Patch.CoarseVerticesCm;
+		Slot.FineNormals = Patch.Normals;
+		Slot.CoarseNormals = Patch.CoarseNormals;
+		UploadCpuMorphedSection(Slot);
+	}
+	else
+	{
+		Slot.FineCm.Reset();
+		Slot.CoarseCm.Reset();
+		Slot.FineNormals.Reset();
+		Slot.CoarseNormals.Reset();
+
+		TArray<FProcMeshTangent> Tangents;
+		Tangents.Reserve(Patch.Tangents.Num());
+		for (const FVector& Tangent : Patch.Tangents)
+		{
+			Tangents.Add(FProcMeshTangent(Tangent, false));
+		}
+
+		if (!Slot.bHasSection)
+		{
+			Slot.Mesh->CreateMeshSection_LinearColor(
+				0,
+				Patch.VerticesCm,
+				PlanetTerrainNextPatch::Indices(),
+				Patch.Normals,
+				Patch.UVs,
+				Patch.UV1,
+				Patch.UV2,
+				TArray<FVector2D>(),
+				Patch.VertexColors,
+				Tangents,
+				false);
+			if (Slot.Material)
+			{
+				Slot.Mesh->SetMaterial(0, Slot.Material);
+			}
+			Slot.bHasSection = true;
+		}
+		else
+		{
+			Slot.Mesh->UpdateMeshSection_LinearColor(
+				0,
+				Patch.VerticesCm,
+				Patch.Normals,
+				Patch.UVs,
+				Patch.UV1,
+				Patch.UV2,
+				TArray<FVector2D>(),
+				Patch.VertexColors,
+				Tangents);
+		}
+	}
+
+	// Expand bounds so WPO / CPU morph to coarse cannot cull the patch.
+	double MaxRadiusCm = 1.0;
+	for (const FVector& V : Patch.VerticesCm)
+	{
+		MaxRadiusCm = FMath::Max(MaxRadiusCm, V.Size());
+	}
+	for (const FVector& V : Patch.CoarseVerticesCm)
+	{
+		MaxRadiusCm = FMath::Max(MaxRadiusCm, V.Size());
+	}
+	const double FineRadius = FMath::Max(1.0, Slot.Mesh->CalcLocalBounds().SphereRadius);
+	Slot.Mesh->SetBoundsScale(static_cast<float>(MaxRadiusCm / FineRadius * 1.25));
+}
+
+void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
+{
+	const int32 Num = Slot.FineCm.Num();
+	if (Num == 0 || Slot.CoarseCm.Num() != Num || !Slot.Mesh)
+	{
+		return;
+	}
+
+	TArray<FVector> Positions;
+	TArray<FVector> Normals;
+	TArray<FVector2D> UV1;
+	TArray<FVector2D> UV2;
+	Positions.SetNumUninitialized(Num);
+	Normals.SetNumUninitialized(Num);
+	UV1.Init(FVector2D::ZeroVector, Num);
+	UV2.Init(FVector2D::ZeroVector, Num);
+
+	const float M = Slot.Morph;
+	for (int32 Index = 0; Index < Num; ++Index)
+	{
+		Positions[Index] = FMath::Lerp(Slot.FineCm[Index], Slot.CoarseCm[Index], M);
+		FVector N = FMath::Lerp(Slot.FineNormals[Index], Slot.CoarseNormals[Index], M);
+		if (!N.Normalize())
+		{
+			N = Slot.FineNormals[Index];
+		}
+		Normals[Index] = N;
+	}
+
+	TArray<FProcMeshTangent> Tangents;
+	Tangents.Reserve(Slot.Tangents.Num());
+	for (const FVector& Tangent : Slot.Tangents)
 	{
 		Tangents.Add(FProcMeshTangent(Tangent, false));
 	}
-
-	Slot.Mesh->SetRelativeLocation(Patch.OriginM * PlanetTerrainNext::CmPerMeter);
 
 	if (!Slot.bHasSection)
 	{
 		Slot.Mesh->CreateMeshSection_LinearColor(
 			0,
-			Patch.VerticesCm,
+			Positions,
 			PlanetTerrainNextPatch::Indices(),
-			Patch.Normals,
-			Patch.UVs,
-			Patch.UV1,
-			Patch.UV2,
+			Normals,
+			Slot.BaseUVs,
+			UV1,
+			UV2,
 			TArray<FVector2D>(),
-			Patch.VertexColors,
+			Slot.BaseColors,
 			Tangents,
 			false);
 		if (Slot.Material)
@@ -548,28 +714,15 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 	{
 		Slot.Mesh->UpdateMeshSection_LinearColor(
 			0,
-			Patch.VerticesCm,
-			Patch.Normals,
-			Patch.UVs,
-			Patch.UV1,
-			Patch.UV2,
+			Positions,
+			Normals,
+			Slot.BaseUVs,
+			UV1,
+			UV2,
 			TArray<FVector2D>(),
-			Patch.VertexColors,
+			Slot.BaseColors,
 			Tangents);
 	}
-
-	// Expand bounds so WPO out to the coarse surface cannot cull the patch.
-	double MaxRadiusCm = 1.0;
-	for (const FVector& V : Patch.VerticesCm)
-	{
-		MaxRadiusCm = FMath::Max(MaxRadiusCm, V.Size());
-	}
-	for (const FVector& V : Patch.CoarseVerticesCm)
-	{
-		MaxRadiusCm = FMath::Max(MaxRadiusCm, V.Size());
-	}
-	const double FineRadius = FMath::Max(1.0, Slot.Mesh->CalcLocalBounds().SphereRadius);
-	Slot.Mesh->SetBoundsScale(static_cast<float>(MaxRadiusCm / FineRadius * 1.05));
 }
 
 void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet)
@@ -606,6 +759,8 @@ void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDr
 			FSlot& Slot = Slots[*SlotIndex];
 			if (!Slot.bShown)
 			{
+				// R9.2: first frame visible → parent-compatible morph; reveal starts now (not while hidden).
+				BeginVisibleHandoff(Slot);
 				Slot.Mesh->SetVisibility(true);
 				Slot.Mesh->SetCastShadow(Settings.bCastShadow);
 				Slot.bShown = true;
@@ -614,6 +769,10 @@ void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDr
 			else
 			{
 				Slot.Mesh->SetCastShadow(Settings.bCastShadow);
+				if (Slot.LodTransition == ELodTransition::Splitting && Slot.MorphReveal >= 1.0f - KINDA_SMALL_NUMBER)
+				{
+					Slot.LodTransition = ELodTransition::Stable;
+				}
 			}
 		}
 	}
@@ -629,6 +788,10 @@ void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDr
 					Slot.Mesh->SetVisibility(false);
 					Slot.Mesh->SetCastShadow(false);
 					Slot.bShown = false;
+					Slot.LodTransition = ELodTransition::Merging;
+					// Freeze reveal so a later re-show does not inherit a mid-reveal from hidden frames.
+					Slot.MorphReveal = 0.0f;
+					Slot.Morph = 1.0f;
 					++Changes;
 				}
 			}
@@ -636,6 +799,29 @@ void UPlanetTerrainNextComponent::ApplyDrawSet(const TArray<FPlanetTerrainNextDr
 	}
 	Drawn = MoveTemp(Next);
 	FrameStats.VisibilityChanges = Changes;
+}
+
+void UPlanetTerrainNextComponent::BeginVisibleHandoff(FSlot& Slot)
+{
+	Slot.Morph = 1.0f;
+	Slot.MorphReveal = 0.0f;
+	Slot.LodTransition = ELodTransition::Splitting;
+	if (Slot.bCpuMorph)
+	{
+		UploadCpuMorphedSection(Slot);
+		if (Slot.Material)
+		{
+			Slot.Material->SetScalarParameterValue(TEXT("Morph"), 0.0f);
+			Slot.Material->SetScalarParameterValue(TEXT("MorphScaleCm"), 1.0f);
+		}
+	}
+	else if (Slot.Material)
+	{
+		Slot.Material->SetScalarParameterValue(TEXT("Morph"), 1.0f);
+		Slot.Material->SetScalarParameterValue(
+			TEXT("MorphScaleCm"),
+			static_cast<float>(FMath::Max(Slot.MaxAbsCoarseDeltaCm, 1.0)));
+	}
 }
 
 void UPlanetTerrainNextComponent::RefreshTilePins(const TArray<FPlanetTerrainNextDrawItem>& DrawSet)
@@ -669,16 +855,36 @@ void UPlanetTerrainNextComponent::RefreshTilePins(const TArray<FPlanetTerrainNex
 void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds)
 {
 	const float Dt = FMath::Max(DeltaSeconds, 0.0f);
-	int32 Updates = 0;
-	double MorphSum = 0.0;
+	TMap<FPlanetTerrainNextNodeId, double> PixelErrors;
+	PixelErrors.Reserve(DrawSet.Num());
 	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
 	{
-		const int32* SlotIndex = Resident.Find(Item.Id);
+		PixelErrors.Add(Item.Id, Item.PixelError);
+	}
+
+	int32 Updates = 0;
+	double MorphSum = 0.0;
+	int32 MorphCount = 0;
+
+	// R9.2: only the final visible set (Drawn). Hidden residents must not advance MorphReveal.
+	for (const FPlanetTerrainNextNodeId& Id : Drawn)
+	{
+		const int32* SlotIndex = Resident.Find(Id);
 		if (!SlotIndex)
 		{
 			continue;
 		}
 		FSlot& Slot = Slots[*SlotIndex];
+		if (!Slot.bShown)
+		{
+			continue;
+		}
+
+		if (const double* Pe = PixelErrors.Find(Id))
+		{
+			Slot.LastPixelError = *Pe;
+		}
+
 		float Target = 0.0f;
 		if (!Settings.bMorphEnabled)
 		{
@@ -693,17 +899,19 @@ void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDraw
 		else
 		{
 			const float PeTarget = PlanetTerrainNextPatch::MorphFromPixelError(
-				Item.PixelError, Settings.Lod.TargetPixelError, Settings.MorphEndFactor);
-			// New children: MorphReveal 0→1 blends parent-compatible (1) into PE target.
+				Slot.LastPixelError, Settings.Lod.TargetPixelError, Settings.MorphEndFactor);
 			if (Settings.MorphRevealSeconds <= KINDA_SMALL_NUMBER)
 			{
 				Slot.MorphReveal = 1.0f;
 			}
 			else
 			{
-				Slot.MorphReveal = FMath::Min(1.0f, Slot.MorphReveal + Dt / Settings.MorphRevealSeconds);
+				const float Linear = FMath::Min(1.0f, Slot.MorphReveal + Dt / Settings.MorphRevealSeconds);
+				// SmoothStep so 1→0 morph eases in after commit (same T for all siblings if same age).
+				Slot.MorphReveal = Linear;
 			}
-			Target = FMath::Lerp(1.0f, PeTarget, Slot.MorphReveal);
+			const float RevealEase = Slot.MorphReveal * Slot.MorphReveal * (3.0f - 2.0f * Slot.MorphReveal);
+			Target = FMath::Lerp(1.0f, PeTarget, RevealEase);
 		}
 
 		float Morph = Target;
@@ -713,13 +921,24 @@ void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDraw
 			Morph = FMath::Lerp(Slot.Morph, Target, Alpha);
 		}
 
-		if (Slot.Material && !FMath::IsNearlyEqual(Slot.Morph, Morph, 1.0e-4f))
+		const bool bMorphChanged = !FMath::IsNearlyEqual(Slot.Morph, Morph, 1.0e-4f);
+		Slot.Morph = Morph;
+		MorphSum += Morph;
+		++MorphCount;
+
+		if (Slot.bCpuMorph)
+		{
+			if (bMorphChanged)
+			{
+				UploadCpuMorphedSection(Slot);
+				++Updates;
+			}
+		}
+		else if (Slot.Material && bMorphChanged)
 		{
 			Slot.Material->SetScalarParameterValue(TEXT("Morph"), Morph);
 			++Updates;
 		}
-		Slot.Morph = Morph;
-		MorphSum += Morph;
 
 		if (Settings.DebugColor == EPlanetTerrainNextDebugColor::Morph)
 		{
@@ -727,7 +946,7 @@ void UPlanetTerrainNextComponent::ApplyMorph(const TArray<FPlanetTerrainNextDraw
 		}
 	}
 	FrameStats.MorphUniformUpdates = Updates;
-	FrameStats.MeanMorph = DrawSet.Num() > 0 ? static_cast<float>(MorphSum / DrawSet.Num()) : 0.0f;
+	FrameStats.MeanMorph = MorphCount > 0 ? static_cast<float>(MorphSum / MorphCount) : 0.0f;
 }
 
 void UPlanetTerrainNextComponent::HideAll()
@@ -760,6 +979,49 @@ void UPlanetTerrainNextComponent::ApplyDebugColor(FSlot& Slot) const
 	}
 }
 
+void UPlanetTerrainNextComponent::ApplyDetailParams(FSlot& Slot) const
+{
+	if (!Slot.Material)
+	{
+		return;
+	}
+
+	const FPlanetTerrainNextNodeId& Id = Slot.Id;
+	const float Scale = static_cast<float>(Id.Size());
+	const float U0 = static_cast<float>(Id.U0());
+	const float V0 = static_cast<float>(Id.V0());
+	Slot.Material->SetScalarParameterValue(TEXT("DetailUVScale"), Scale);
+	Slot.Material->SetVectorParameterValue(TEXT("DetailUVOffset"), FLinearColor(U0, V0, 0.0f, 0.0f));
+
+	const bool bWantDetail = Settings.bDetailProjection
+		&& Settings.DebugColor == EPlanetTerrainNextDebugColor::Regolith
+		&& DetailStore.IsValid()
+		&& DetailStore->IsFaceReady(Id.Face);
+
+	UTexture2D* Albedo = bWantDetail ? DetailStore->GetAlbedo(Id.Face) : nullptr;
+	UTexture2D* Normal = bWantDetail ? DetailStore->GetNormal(Id.Face) : nullptr;
+	if (Albedo)
+	{
+		Slot.Material->SetTextureParameterValue(TEXT("DetailAlbedo"), Albedo);
+	}
+	if (Normal)
+	{
+		Slot.Material->SetTextureParameterValue(TEXT("DetailNormal"), Normal);
+	}
+	Slot.Material->SetScalarParameterValue(TEXT("DetailBlend"), (bWantDetail && Albedo && Normal) ? 1.0f : 0.0f);
+}
+
+void UPlanetTerrainNextComponent::RefreshDetailParams()
+{
+	for (FSlot& Slot : Slots)
+	{
+		if (Slot.bInUse)
+		{
+			ApplyDetailParams(Slot);
+		}
+	}
+}
+
 void UPlanetTerrainNextComponent::RefreshDebugColors()
 {
 	if (AppliedDebugColor == Settings.DebugColor)
@@ -772,6 +1034,7 @@ void UPlanetTerrainNextComponent::RefreshDebugColors()
 		if (Slot.bInUse)
 		{
 			ApplyDebugColor(Slot);
+			ApplyDetailParams(Slot);
 		}
 	}
 }
@@ -917,9 +1180,11 @@ bool UPlanetTerrainNextComponent::CookCollisionNode(const FPlanetTerrainNextNode
 
 	UProceduralMeshComponent* Mesh = CollisionMeshes[SlotIndex];
 	const double Start = FPlatformTime::Seconds();
-	const double SkirtDepth = PlanetTerrainNextPatch::RecommendedSkirtDepthM(
-		GeometricErrorByLevel[FMath::Clamp(Id.Level - 2, 0, MaxTreeLevel)],
-		PlanetTerrainNextPatch::VertexSpacingMeters(Descriptor.RadiusMeters, Id.Level));
+	const double SkirtDepth = Settings.bSkirtsEnabled
+		? PlanetTerrainNextPatch::RecommendedSkirtDepthM(
+			GeometricErrorByLevel[FMath::Clamp(Id.Level - 2, 0, MaxTreeLevel)],
+			PlanetTerrainNextPatch::VertexSpacingMeters(Descriptor.RadiusMeters, Id.Level))
+		: 0.0;
 	FPlanetTerrainNextPatchData Patch;
 	PlanetTerrainNextPatch::BuildFromTile(*HeightField, *Tile, SkirtDepth, Patch);
 
@@ -1061,6 +1326,43 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 			: 0);
 	}
 	Scheduler->SetBudgets(Settings.MaxBakeWorkers, Settings.MaxBakeQueue);
+	if (DetailStore.IsValid())
+	{
+		DetailStore->SetEnabled(Settings.bDetailProjection);
+		DetailStore->SetBudgets(Settings.DetailMaxConcurrentBakes, Settings.DetailUploadsPerFrame);
+		bool bRefreshDetail = false;
+		if (Settings.bDetailProjection)
+		{
+			DetailStore->Tick(HeightField, this);
+			if (DetailAlbedoTextures.Num() < 6)
+			{
+				DetailAlbedoTextures.SetNum(6);
+				DetailNormalTextures.SetNum(6);
+			}
+			for (int32 Face = 0; Face < 6; ++Face)
+			{
+				DetailAlbedoTextures[Face] = DetailStore->GetAlbedo(static_cast<uint8>(Face));
+				DetailNormalTextures[Face] = DetailStore->GetNormal(static_cast<uint8>(Face));
+			}
+			bRefreshDetail = DetailStore->ConsumeDirty() || !bDetailProjectionLive;
+			bDetailProjectionLive = true;
+		}
+		else if (bDetailProjectionLive)
+		{
+			bDetailProjectionLive = false;
+			bRefreshDetail = true;
+		}
+		if (bRefreshDetail)
+		{
+			RefreshDetailParams();
+		}
+		const FPlanetTerrainNextDetailStoreStats& DetailStats = DetailStore->GetStats();
+		FrameStats.DetailReadyFaces = Settings.bDetailProjection ? DetailStats.ReadyFaces : 0;
+		FrameStats.DetailPending = Settings.bDetailProjection ? DetailStats.PendingBakes : 0;
+		FrameStats.DetailBaking = Settings.bDetailProjection ? DetailStats.Baking : 0;
+		FrameStats.DetailUploads = DetailStats.UploadsThisFrame;
+		FrameStats.DetailBakeP95Ms = DetailStats.P95BakeMs;
+	}
 	++FrameCounter;
 	GpuPool->BeginFrame(FrameCounter);
 	TileCache->BeginFrame();
@@ -1142,6 +1444,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	UpdateCollision(View);
 	FrameStats.CollisionMs = (FPlatformTime::Seconds() - CollStart) * 1000.0;
 	RefreshTilePins(DrawSet);
+	// Morph after handoff visibility so reveal cannot run on hidden children (R9.2).
 	ApplyMorph(DrawSet, DeltaTime);
 
 	const FPlanetTerrainNextQuadtreeStats& TreeStats = Quadtree.GetStats();
@@ -1150,7 +1453,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	FrameStats.Merges = TreeStats.Merges;
 	FrameStats.BudgetBlocked = TreeStats.BudgetBlocked;
 	FrameStats.Resident = Resident.Num();
-	FrameStats.Drawn = DrawSet.Num();
+	FrameStats.Drawn = Drawn.Num();
 	FrameStats.Pending = FMath::Max(0, Pending.Num() - Built);
 	FrameStats.BuiltThisFrame = Built;
 	FrameStats.Slots = Slots.Num();
@@ -1159,18 +1462,18 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	FrameStats.DrawnL1 = 0;
 	FrameStats.DrawnL2 = 0;
 	FrameStats.DrawnL3Plus = 0;
-	for (const FPlanetTerrainNextDrawItem& Item : DrawSet)
+	for (const FPlanetTerrainNextNodeId& Id : Drawn)
 	{
-		FrameStats.MaxDrawnLevel = FMath::Max(FrameStats.MaxDrawnLevel, static_cast<int32>(Item.Id.Level));
-		if (Item.Id.Level == 0)
+		FrameStats.MaxDrawnLevel = FMath::Max(FrameStats.MaxDrawnLevel, static_cast<int32>(Id.Level));
+		if (Id.Level == 0)
 		{
 			++FrameStats.DrawnL0;
 		}
-		else if (Item.Id.Level == 1)
+		else if (Id.Level == 1)
 		{
 			++FrameStats.DrawnL1;
 		}
-		else if (Item.Id.Level == 2)
+		else if (Id.Level == 2)
 		{
 			++FrameStats.DrawnL2;
 		}
@@ -1239,10 +1542,11 @@ void UPlanetTerrainNextComponent::PrintStats() const
 		0.0f,
 		HasFullCoverage() ? FColor(140, 230, 140) : FColor::Red,
 		FString::Printf(
-			TEXT("TerrainNext R8 | alt %s | drawn %d L%d (L0:%d L1:%d L2:%d L3+:%d) handoff %d | cov %s | disk %d/%d w%d | morph %.2f | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f | tick %.2f ms"),
+			TEXT("TerrainNext R9 | alt %s | drawn %d L%d (L0:%d L1:%d L2:%d L3+:%d) handoff %d | cov %s | detail %d/6 p%d | disk %d/%d w%d | morph %.2f | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f | tick %.2f ms"),
 			*AltitudeText, S.Drawn, S.MaxDrawnLevel,
 			S.DrawnL0, S.DrawnL1, S.DrawnL2, S.DrawnL3Plus, S.HandoffParentsKept,
 			S.bDrawCoverageOk ? TEXT("ok") : TEXT("HOLE"),
+			S.DetailReadyFaces, S.DetailPending,
 			S.DiskHits, S.DiskMisses, S.DiskWrites,
 			S.MeanMorph,
 			S.CollisionResident, S.CollisionDesired,

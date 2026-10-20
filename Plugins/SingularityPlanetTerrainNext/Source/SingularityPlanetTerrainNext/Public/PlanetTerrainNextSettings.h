@@ -33,6 +33,17 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	float MorphRevealSeconds = 0.45f;
 	/** Keep parent drawn this many frames after children are ready (no co-draw). */
 	int32 MorphHandoffFrames = 6;
+	/** When false, skirt depth is forced to 0 (R9.1 diagnostic). Topology unchanged. */
+	bool bSkirtsEnabled = true;
+	/**
+	 * Levels at or below this use CPU morph (no PMC UV WPO). Also used when
+	 * MaxAbsCoarseDeltaCm exceeds MorphGpuMaxScaleCm (F16×scale quantization).
+	 */
+	int32 MorphCpuMaxLevel = 2;
+	/** Above this |Δ|cm, force CPU morph even at fine levels (F16 ULP×scale ≈ cm error). */
+	float MorphGpuMaxScaleCm = 1000.0f;
+	/** When false, all patches CPU-morph and WPO Morph is forced to 0 (disconnect WPO). */
+	bool bMorphWpoEnabled = true;
 	/** Max CPU height tiles kept (separate from GPU residency). */
 	int32 CpuTileCacheSize = 1024;
 	/** Persist height tiles under Saved/SingularityPlanetTerrainNext/Tiles. */
@@ -60,6 +71,15 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	 * Copied into Lod.PeripheralLodScale each Read().
 	 */
 	double PeripheralLodScale = 1.0;
+
+	/** R9.3: project root-face albedo/normal textures onto patches. */
+	bool bDetailProjection = true;
+	/** Root detail texture edge length (64–1024). Applied on next terrain init. */
+	int32 DetailResolution = 512;
+	/** Concurrent detail-tile bake workers (independent of height-tile workers). */
+	int32 DetailMaxConcurrentBakes = 2;
+	/** GPU detail texture uploads per frame. */
+	int32 DetailUploadsPerFrame = 1;
 
 	static FPlanetTerrainNextRuntimeSettings Read();
 };

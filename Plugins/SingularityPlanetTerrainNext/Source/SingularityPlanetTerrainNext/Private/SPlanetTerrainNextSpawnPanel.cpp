@@ -287,6 +287,18 @@ void SPlanetTerrainNextSpawnPanel::Construct(const FArguments& InArgs)
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 						[
+							MakeCVarCheckRow(TEXT("Skirts"), TEXT("singularity.TerrainNext.SkirtsEnabled"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarCheckRow(TEXT("Morph WPO (off=CPU)"), TEXT("singularity.TerrainNext.MorphWpoEnabled"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarIntRow(TEXT("CPU morph max LOD"), TEXT("singularity.TerrainNext.MorphCpuMaxLevel"), -1, 12)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
 							MakeCVarCheckRow(TEXT("Disk tile cache"), TEXT("singularity.TerrainNext.DiskCache"))
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)

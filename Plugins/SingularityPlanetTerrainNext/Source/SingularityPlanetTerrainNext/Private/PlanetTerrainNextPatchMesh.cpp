@@ -52,8 +52,23 @@ TArray<int32> MakeIndices()
 			const int32 TopB = EdgeGridIndex(Edge, K + 1);
 			const int32 BotA = GridVertexCount + Edge * Row + K;
 			const int32 BotB = BotA + 1;
-			// Single-sided skirt (hanging inward). Two-sided curtains at L0/L1 looked inverted.
-			Out.Append({TopA, BotA, TopB, TopB, BotA, BotB});
+			// Match Legacy UPlanetTerrainComponent skirt winding per edge
+			// (Edge 0=J0, 1=Jmax, 2=I0, 3=Imax).
+			switch (Edge)
+			{
+			case 0: // Bottom J=0: {A, SA, B, B, SA, SB}
+				Out.Append({TopA, BotA, TopB, TopB, BotA, BotB});
+				break;
+			case 1: // Top J=max: {C, D, SC, D, SD, SC}
+				Out.Append({TopA, TopB, BotA, TopB, BotB, BotA});
+				break;
+			case 2: // Left I=0: {A, B, SA, B, SB, SA}
+				Out.Append({TopA, TopB, BotA, TopB, BotB, BotA});
+				break;
+			default: // Right I=max: {C, SC, D, D, SC, SD}
+				Out.Append({TopA, BotA, TopB, TopB, BotA, BotB});
+				break;
+			}
 		}
 	}
 	return Out;
@@ -94,7 +109,15 @@ FVector3d BilinearParent(const TArray<FVector3d>& Grid, double U, double V)
 
 const TArray<int32>& Indices()
 {
-	static const TArray<int32> Shared = MakeIndices();
+	// Versioned so Live Coding / hot reload picks up skirt winding fixes.
+	constexpr int32 IndexBufferVersion = 3;
+	static int32 BuiltVersion = -1;
+	static TArray<int32> Shared;
+	if (BuiltVersion != IndexBufferVersion)
+	{
+		Shared = MakeIndices();
+		BuiltVersion = IndexBufferVersion;
+	}
 	return Shared;
 }
 
@@ -326,9 +349,15 @@ void BuildFromTile(
 		}
 	}
 
+	// Normalize morph deltas into ~[-1,1] so ProceduralMesh F16 UVs cannot overflow
+	// (raw cm deltas at coarse LODs reach ~1e7 and become Inf → missing faces).
+	const float Scale = static_cast<float>(FMath::Max(Out.MaxAbsCoarseDeltaCm, 1.0));
 	for (int32 Index = 0; Index < VertexCount; ++Index)
 	{
-		Out.UV2[Index].Y = Out.MaxAbsCoarseDeltaCm;
+		Out.UV1[Index].X /= Scale;
+		Out.UV1[Index].Y /= Scale;
+		Out.UV2[Index].X /= Scale;
+		Out.UV2[Index].Y = 0.0f;
 	}
 }
 

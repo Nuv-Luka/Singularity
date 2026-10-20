@@ -1,6 +1,6 @@
 # Planet Terrain Next — architecture
 
-**Milestone:** R8 (performance polish; R7 descent deferred). See `R2_Status.md`–`R8_Status.md` and `R7_Status.md`.
+**Milestone:** R9.2 (morph↔visibility sync). R9.1 L0–L2 holes open. R7 deferred. See `R9_Status.md`.
 
 **Scope:** one airless rocky moon. No atmosphere, ocean, ice tectonics, foliage, planetary rotation, or a second landable body.
 

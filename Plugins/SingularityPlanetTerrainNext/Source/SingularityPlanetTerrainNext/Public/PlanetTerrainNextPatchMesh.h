@@ -13,10 +13,12 @@ struct FPlanetTerrainNextHeightTile;
  * Coarse is the bilinear reconstruction of the parent patch's vertex grid (roots: coarse = fine),
  * so at Morph = 1 a child edge lies on the parent edge (exact T-junction).
  *
- * GPU packing (ProceduralMesh UV channels):
+ * GPU packing (ProceduralMesh UV channels) — R9.1 precision-safe:
  *   UV0 = patch UV
- *   UV1 = CoarseOffset.xy (cm)   where CoarseOffset = Coarse - Fine
- *   UV2 = (CoarseOffset.z, MaxAbsOffsetCm)
+ *   UV1 = NormalizedDelta.xy   where Delta = Coarse - Fine (cm), Norm = Delta / Scale
+ *   UV2 = (NormalizedDelta.z, unused)
+ *   Scale = max(MaxAbsCoarseDeltaCm, 1) is NOT stored in UVs (would overflow F16);
+ *   it is set as MID scalar MorphScaleCm. WPO = Transform(NormDelta * Morph * MorphScaleCm).
  *   VertexColor.rgb = CoarseNormal * 0.5 + 0.5
  */
 struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextPatchData

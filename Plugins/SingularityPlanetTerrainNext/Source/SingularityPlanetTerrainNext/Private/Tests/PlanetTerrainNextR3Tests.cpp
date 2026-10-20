@@ -194,18 +194,19 @@ bool FPlanetTerrainNextNoMeshRebuildInvariantTest::RunTest(const FString& Parame
 	const TArray<FVector2D> UV1Snapshot = Patch.UV1;
 	const TArray<FVector2D> UV2Snapshot = Patch.UV2;
 
-	// Morph is a pure function of stored attributes — changing Morph never mutates the buffers.
+	// R9.1: UVs hold normalized deltas; reconstruct with MorphScaleCm = max(|Δ|, 1).
+	const float MorphScaleCm = static_cast<float>(FMath::Max(Patch.MaxAbsCoarseDeltaCm, 1.0));
 	for (float Morph : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f})
 	{
 		for (int32 Index = 0; Index < VertexCount; ++Index)
 		{
 			const FVector Expected = FMath::Lerp(FineSnapshot[Index], CoarseSnapshot[Index], Morph);
 			const FVector FromUV(
-				FineSnapshot[Index].X + UV1Snapshot[Index].X * Morph,
-				FineSnapshot[Index].Y + UV1Snapshot[Index].Y * Morph,
-				FineSnapshot[Index].Z + UV2Snapshot[Index].X * Morph);
-			if (!TestTrue(TEXT("UV-packed coarse offset reconstructs Morph lerp"),
-				(Expected - FromUV).Size() < 1.0e-3))
+				FineSnapshot[Index].X + UV1Snapshot[Index].X * MorphScaleCm * Morph,
+				FineSnapshot[Index].Y + UV1Snapshot[Index].Y * MorphScaleCm * Morph,
+				FineSnapshot[Index].Z + UV2Snapshot[Index].X * MorphScaleCm * Morph);
+			if (!TestTrue(TEXT("normalized UV * MorphScaleCm reconstructs Morph lerp"),
+				(Expected - FromUV).Size() < 1.0e-2))
 			{
 				return true;
 			}

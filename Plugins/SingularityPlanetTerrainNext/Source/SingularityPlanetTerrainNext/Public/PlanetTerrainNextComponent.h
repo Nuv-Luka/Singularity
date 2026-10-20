@@ -4,6 +4,7 @@
 #include "Templates/Function.h"
 #include "Components/SceneComponent.h"
 #include "PlanetTerrainNextCollisionManager.h"
+#include "PlanetTerrainNextDetailStore.h"
 #include "PlanetTerrainNextDiskTileStore.h"
 #include "PlanetTerrainNextGpuSlotPool.h"
 #include "PlanetTerrainNextHeightField.h"
@@ -17,6 +18,7 @@
 
 class UMaterialInstanceDynamic;
 class UProceduralMeshComponent;
+class UTexture2D;
 struct FPlanetTerrainNextPatchData;
 
 struct FPlanetTerrainNextFrameStats
@@ -73,6 +75,12 @@ struct FPlanetTerrainNextFrameStats
 	double UpdateMs = 0.0;
 	double AltitudeM = 0.0;
 	float MeanMorph = 0.0f;
+	/** R9.3 detail projection */
+	int32 DetailReadyFaces = 0;
+	int32 DetailPending = 0;
+	int32 DetailBaking = 0;
+	int32 DetailUploads = 0;
+	double DetailBakeP95Ms = 0.0;
 };
 
 /**
@@ -133,6 +141,14 @@ public:
 	const FPlanetTerrainNextHeightField* GetHeightField() const { return HeightField.Get(); }
 
 private:
+	enum class ELodTransition : uint8
+	{
+		Stable = 0,
+		WaitingForChildren,
+		Splitting,
+		Merging
+	};
+
 	struct FSlot
 	{
 		TObjectPtr<UProceduralMeshComponent> Mesh = nullptr;
@@ -143,7 +159,21 @@ private:
 		float Morph = 0.0f;
 		/** 0 = locked to parent (Morph→1), 1 = fully driven by pixel-error target. */
 		float MorphReveal = 1.0f;
+		double LastPixelError = 0.0;
+		ELodTransition LodTransition = ELodTransition::Stable;
 		double MaxAbsCoarseDeltaCm = 0.0;
+		/**
+		 * L0/L1: bake morph into vertex positions (WPO UVs cannot be trusted at face scale).
+		 * Fine/Coarse kept so ApplyMorph can UpdateMeshSection without rebuild.
+		 */
+		bool bCpuMorph = false;
+		TArray<FVector> FineCm;
+		TArray<FVector> CoarseCm;
+		TArray<FVector> FineNormals;
+		TArray<FVector> CoarseNormals;
+		TArray<FVector> Tangents;
+		TArray<FVector2D> BaseUVs;
+		TArray<FLinearColor> BaseColors;
 		bool bInUse = false;
 		bool bHasSection = false;
 		bool bShown = false;
@@ -154,15 +184,20 @@ private:
 	void ReleaseNode(const FPlanetTerrainNextNodeId& Id);
 	bool BuildNode(const FPlanetTerrainNextNodeId& Id);
 	void UploadPatch(FSlot& Slot, const FPlanetTerrainNextPatchData& Patch);
+	void UploadCpuMorphedSection(FSlot& Slot);
 	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
 	bool CheckDrawCoverage(const TArray<FPlanetTerrainNextDrawItem>& DrawSet) const;
+	/** Morph only patches that are actually shown after handoff (R9.2). */
 	void ApplyMorph(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds);
+	void BeginVisibleHandoff(FSlot& Slot);
 	void RefreshTilePins(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
 	void UpdateCollision(const FPlanetTerrainNextView& View);
 	bool CookCollisionNode(const FPlanetTerrainNextNodeId& Id);
 	void ReleaseCollisionNode(const FPlanetTerrainNextNodeId& Id);
 	void HideAll();
 	void ApplyDebugColor(FSlot& Slot) const;
+	void ApplyDetailParams(FSlot& Slot) const;
+	void RefreshDetailParams();
 	void RefreshDebugColors();
 	bool GetView(FPlanetTerrainNextView& OutView) const;
 	void RecordBuildTime(double Milliseconds);
@@ -177,6 +212,7 @@ private:
 	TSharedPtr<FPlanetTerrainNextDiskTileStore> DiskTileStore;
 	TSharedPtr<FPlanetTerrainNextGpuSlotPool> GpuPool;
 	TSharedPtr<FPlanetTerrainNextTileScheduler> Scheduler;
+	TSharedPtr<FPlanetTerrainNextDetailStore> DetailStore;
 	FPlanetTerrainNextTilePlanner Planner;
 	FPlanetTerrainNextCollisionManager CollisionManager;
 	TArray<double> GeometricErrorByLevel;
@@ -191,6 +227,11 @@ private:
 	/** Collision-only meshes (invisible, QueryAndPhysics). Independent of visual LOD. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UProceduralMeshComponent>> CollisionMeshes;
+	/** R9.3: keep root detail textures alive for GC (owned by DetailStore creation). */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UTexture2D>> DetailAlbedoTextures;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UTexture2D>> DetailNormalTextures;
 
 	TWeakObjectPtr<UPrimitiveComponent> SuspendedProxy;
 
@@ -209,4 +250,6 @@ private:
 	EPlanetTerrainNextDebugColor AppliedDebugColor = EPlanetTerrainNextDebugColor::Regolith;
 	bool bInitialized = false;
 	bool bSuspended = false;
+	/** Last frame's DetailProjection CVar — detect toggles for MID refresh. */
+	bool bDetailProjectionLive = false;
 };

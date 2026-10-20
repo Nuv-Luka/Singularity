@@ -79,6 +79,26 @@ TAutoConsoleVariable<int32> CVarMorphHandoffFrames(
 	6,
 	TEXT("Frames to keep the parent drawn after children are ready (children hidden; no co-draw)."));
 
+TAutoConsoleVariable<bool> CVarSkirtsEnabled(
+	TEXT("singularity.TerrainNext.SkirtsEnabled"),
+	true,
+	TEXT("R9.1: when false, skirt depth is 0 (hides skirt geometry for winding diagnostics)."));
+
+TAutoConsoleVariable<int32> CVarMorphCpuMaxLevel(
+	TEXT("singularity.TerrainNext.MorphCpuMaxLevel"),
+	2,
+	TEXT("R9.1: LOD <= this bake Morph into vertices (no F16 UV WPO). Default 2 covers L0–L2."));
+
+TAutoConsoleVariable<float> CVarMorphGpuMaxScaleCm(
+	TEXT("singularity.TerrainNext.MorphGpuMaxScaleCm"),
+	1000.0f,
+	TEXT("R9.1: if MaxAbsCoarseDeltaCm exceeds this, force CPU morph (F16×scale quantization)."));
+
+TAutoConsoleVariable<bool> CVarMorphWpoEnabled(
+	TEXT("singularity.TerrainNext.MorphWpoEnabled"),
+	true,
+	TEXT("R9.1 diagnostic: false = disconnect WPO (CPU morph all patches, Morph scalar=0)."));
+
 TAutoConsoleVariable<int32> CVarCpuTileCache(
 	TEXT("singularity.TerrainNext.CpuTileCache"),
 	1024,
@@ -143,6 +163,26 @@ TAutoConsoleVariable<float> CVarPeripheralLodScale(
 	TEXT("singularity.TerrainNext.PeripheralLodScale"),
 	1.0f,
 	TEXT("R8: multiply projected pixel error toward frustum rim (1=off, 0.7=mild periphery coarsening)."));
+
+TAutoConsoleVariable<bool> CVarDetailProjection(
+	TEXT("singularity.TerrainNext.DetailProjection"),
+	true,
+	TEXT("R9.3: sample root-face albedo/normal detail textures on patches."));
+
+TAutoConsoleVariable<int32> CVarDetailResolution(
+	TEXT("singularity.TerrainNext.DetailResolution"),
+	512,
+	TEXT("R9.3: root detail texture resolution (64–1024). Takes effect on next InitializeTerrain."));
+
+TAutoConsoleVariable<int32> CVarDetailMaxConcurrentBakes(
+	TEXT("singularity.TerrainNext.DetailMaxConcurrentBakes"),
+	2,
+	TEXT("R9.3: concurrent CPU detail-tile bake workers (1–6)."));
+
+TAutoConsoleVariable<int32> CVarDetailUploadsPerFrame(
+	TEXT("singularity.TerrainNext.DetailUploadsPerFrame"),
+	1,
+	TEXT("R9.3: max detail texture GPU uploads per frame (0–6)."));
 } // namespace
 
 FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
@@ -163,6 +203,10 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.MorphSmoothSeconds = FMath::Max(0.0f, CVarMorphSmooth.GetValueOnGameThread());
 	Out.MorphRevealSeconds = FMath::Max(0.0f, CVarMorphReveal.GetValueOnGameThread());
 	Out.MorphHandoffFrames = FMath::Clamp(CVarMorphHandoffFrames.GetValueOnGameThread(), 1, 120);
+	Out.bSkirtsEnabled = CVarSkirtsEnabled.GetValueOnGameThread();
+	Out.MorphCpuMaxLevel = FMath::Clamp(CVarMorphCpuMaxLevel.GetValueOnGameThread(), -1, 24);
+	Out.MorphGpuMaxScaleCm = FMath::Max(1.0f, CVarMorphGpuMaxScaleCm.GetValueOnGameThread());
+	Out.bMorphWpoEnabled = CVarMorphWpoEnabled.GetValueOnGameThread();
 	Out.CpuTileCacheSize = FMath::Clamp(CVarCpuTileCache.GetValueOnGameThread(), 8, 16384);
 	Out.bDiskCache = CVarDiskCache.GetValueOnGameThread();
 	Out.DiskCacheMaxMB = FMath::Clamp(CVarDiskCacheMaxMB.GetValueOnGameThread(), 0, 1024 * 1024);
@@ -177,6 +221,10 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.bCastShadow = CVarCastShadow.GetValueOnGameThread();
 	Out.PeripheralLodScale = FMath::Clamp(static_cast<double>(CVarPeripheralLodScale.GetValueOnGameThread()), 0.25, 1.0);
 	Out.Lod.PeripheralLodScale = Out.PeripheralLodScale;
+	Out.bDetailProjection = CVarDetailProjection.GetValueOnGameThread();
+	Out.DetailResolution = FMath::Clamp(CVarDetailResolution.GetValueOnGameThread(), 64, 1024);
+	Out.DetailMaxConcurrentBakes = FMath::Clamp(CVarDetailMaxConcurrentBakes.GetValueOnGameThread(), 1, 6);
+	Out.DetailUploadsPerFrame = FMath::Clamp(CVarDetailUploadsPerFrame.GetValueOnGameThread(), 0, 6);
 	return Out;
 }
 
