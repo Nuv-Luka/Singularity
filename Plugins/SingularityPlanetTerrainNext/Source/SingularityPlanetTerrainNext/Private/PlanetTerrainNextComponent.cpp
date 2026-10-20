@@ -14,7 +14,9 @@
 #include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/Paths.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
@@ -170,6 +172,13 @@ void UPlanetTerrainNextComponent::InitializeTerrain(const FPlanetTerrainNextDesc
 
 void UPlanetTerrainNextComponent::ShutdownTerrain()
 {
+	if (PerfCsvArchive)
+	{
+		PerfCsvArchive->Close();
+		delete PerfCsvArchive;
+		PerfCsvArchive = nullptr;
+		bPerfCsvHeaderWritten = false;
+	}
 	for (FSlot& Slot : Slots)
 	{
 		if (Slot.Mesh)
@@ -1651,6 +1660,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 	const double TickStart = FPlatformTime::Seconds();
 	const double FrameMs = FMath::Max(0.0, static_cast<double>(DeltaTime) * 1000.0);
+	FrameStats.DeltaMs = FrameMs;
 	if (FrameTimeMsSamples.Num() < 256)
 	{
 		FrameTimeMsSamples.Add(FrameMs);
@@ -1956,6 +1966,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	FrameStats.AltitudeM = CollisionManager.SampleAltitudeM(*HeightField, View.CameraM);
 	FrameStats.UpdateMs = (FPlatformTime::Seconds() - TickStart) * 1000.0;
 	FrameStats.bDiagActive = false;
+	WritePerfSample();
 
 	if (Settings.bShowStats)
 	{
@@ -2098,6 +2109,96 @@ void UPlanetTerrainNextComponent::TickDiagnostic(float DeltaSeconds)
 	FrameStats.Resident = Resident.Num();
 	FrameStats.DetailReadyFaces = 0;
 	FrameStats.DetailPending = 0;
+}
+
+void UPlanetTerrainNextComponent::WritePerfSample()
+{
+	if (!Settings.bPerfCapture)
+	{
+		if (PerfCsvArchive)
+		{
+			PerfCsvArchive->Close();
+			delete PerfCsvArchive;
+			PerfCsvArchive = nullptr;
+			bPerfCsvHeaderWritten = false;
+		}
+		return;
+	}
+
+	if (!PerfCsvArchive)
+	{
+		const FString Path = FPaths::ProjectSavedDir() / TEXT("Logs/PlanetTerrainNextPerf.csv");
+		const int64 ExistingBytes = IFileManager::Get().FileSize(*Path);
+		PerfCsvArchive = IFileManager::Get().CreateFileWriter(*Path, FILEWRITE_Append);
+		if (!PerfCsvArchive)
+		{
+			return;
+		}
+		bPerfCsvHeaderWritten = ExistingBytes > 0;
+	}
+
+	if (!bPerfCsvHeaderWritten)
+	{
+		const ANSICHAR Header[] =
+			"frame,scenario,delta_ms,update_ms,tree_ms,schedule_ms,mesh_build_ms,collision_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,"
+			"nodes,resident,drawn,pending,fades,visibility_changes,mesh_creates,mesh_updates,mesh_clears,mesh_rebuilds,"
+			"cpu_morph_active,cpu_morph_uploads,cpu_morph_upload_ms,detail_ready,detail_pending,detail_baking,detail_uploads,"
+			"detail_bake_p95_ms,detail_upload_ms,tile_cache_hits,tile_cache_misses,tile_bakes,disk_hits,disk_misses,disk_writes,"
+			"gpu_resident,gpu_uploads,collision_resident,collision_desired,collision_cooked,coverage_ok\n";
+		PerfCsvArchive->Serialize(const_cast<ANSICHAR*>(Header), UE_ARRAY_COUNT(Header) - 1);
+		bPerfCsvHeaderWritten = true;
+	}
+
+	const FString Line = FString::Printf(
+		TEXT("%lld,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%d,%d,%d,%d,%.4f,%.4f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"),
+		FrameCounter,
+		*Settings.PerfScenario.Replace(TEXT(","), TEXT("_")),
+		FrameStats.DeltaMs,
+		FrameStats.UpdateMs,
+		FrameStats.TreeMs,
+		FrameStats.ScheduleMs,
+		FrameStats.MeshBuildMs,
+		FrameStats.CollisionMs,
+		FrameStats.FrameP50Ms,
+		FrameStats.FrameP95Ms,
+		FrameStats.FrameP99Ms,
+		FrameStats.Nodes,
+		FrameStats.Resident,
+		FrameStats.Drawn,
+		FrameStats.Pending,
+		FrameStats.ActiveLodFades,
+		FrameStats.VisibilityChanges,
+		FrameStats.MeshSectionCreates,
+		FrameStats.MeshSectionUpdates,
+		FrameStats.MeshSectionClears,
+		FrameStats.MeshResourceRebuilds,
+		FrameStats.ActiveCpuMorphPatches,
+		FrameStats.CpuMorphUploads,
+		FrameStats.CpuMorphUploadMs,
+		FrameStats.DetailReadyFaces,
+		FrameStats.DetailPending,
+		FrameStats.DetailBaking,
+		FrameStats.DetailUploads,
+		FrameStats.DetailBakeP95Ms,
+		FrameStats.DetailUploadMs,
+		FrameStats.TileCacheHits,
+		FrameStats.TileCacheMisses,
+		FrameStats.TileBakes,
+		FrameStats.DiskHits,
+		FrameStats.DiskMisses,
+		FrameStats.DiskWrites,
+		FrameStats.GpuResident,
+		FrameStats.GpuUploads,
+		FrameStats.CollisionResident,
+		FrameStats.CollisionDesired,
+		FrameStats.CollisionCooked,
+		FrameStats.bDrawCoverageOk ? 1 : 0);
+	FTCHARToUTF8 LineUtf8(*Line);
+	PerfCsvArchive->Serialize(const_cast<ANSICHAR*>(LineUtf8.Get()), LineUtf8.Length());
+	if ((FrameCounter % 30) == 0)
+	{
+		PerfCsvArchive->Flush();
+	}
 }
 
 void UPlanetTerrainNextComponent::PrintStats() const

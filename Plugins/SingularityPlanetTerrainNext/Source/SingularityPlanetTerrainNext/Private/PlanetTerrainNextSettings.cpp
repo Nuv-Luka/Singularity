@@ -208,6 +208,16 @@ TAutoConsoleVariable<int32> CVarMaxConcurrentTransitionGroups(
 	TEXT("singularity.TerrainNext.MaxConcurrentTransitionGroups"),
 	24,
 	TEXT("R10.2: max simultaneous dither fade groups (excess use exclusive handoff)."));
+
+TAutoConsoleVariable<bool> CVarPerfCapture(
+	TEXT("singularity.TerrainNext.PerfCapture"),
+	false,
+	TEXT("R10 measurement: append per-frame terrain telemetry to Saved/Logs/PlanetTerrainNextPerf.csv."));
+
+TAutoConsoleVariable<FString> CVarPerfScenario(
+	TEXT("singularity.TerrainNext.PerfScenario"),
+	TEXT("UNSET"),
+	TEXT("R10 measurement scenario label written to the terrain performance CSV."));
 } // namespace
 
 FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
@@ -255,6 +265,8 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.bEnableLegacyMorph = CVarEnableLegacyMorph.GetValueOnGameThread();
 	Out.LodTransitionSeconds = FMath::Clamp(CVarLodTransitionSeconds.GetValueOnGameThread(), 0.05f, 5.0f);
 	Out.MaxConcurrentTransitionGroups = FMath::Clamp(CVarMaxConcurrentTransitionGroups.GetValueOnGameThread(), 1, 128);
+	Out.bPerfCapture = CVarPerfCapture.GetValueOnGameThread();
+	Out.PerfScenario = CVarPerfScenario.GetValueOnGameThread();
 	return Out;
 }
 

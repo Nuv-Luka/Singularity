@@ -21,6 +21,7 @@ class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UProceduralMeshComponent;
 class UTexture2D;
+class FArchive;
 struct FPlanetTerrainNextPatchData;
 
 struct FPlanetTerrainNextFrameStats
@@ -82,6 +83,7 @@ struct FPlanetTerrainNextFrameStats
 	double MeshBuildMs = 0.0;
 	double CollisionMs = 0.0;
 	double UpdateMs = 0.0;
+	double DeltaMs = 0.0;
 	double FrameP50Ms = 0.0;
 	double FrameP95Ms = 0.0;
 	double FrameP99Ms = 0.0;
@@ -239,6 +241,7 @@ private:
 	void RefreshDebugColors();
 	bool GetView(FPlanetTerrainNextView& OutView) const;
 	void RecordBuildTime(double Milliseconds);
+	void WritePerfSample();
 	void PrintStats() const;
 
 	FPlanetTerrainNextDescriptor Descriptor;
@@ -298,4 +301,7 @@ private:
 	/** R10.1: last diag rebuild key; INDEX_NONE when diag off. */
 	uint32 DiagRebuildKey = 0;
 	bool bDiagWasEnabled = false;
+	/** R10 opt-in frame telemetry writer; null unless PerfCapture is enabled. */
+	FArchive* PerfCsvArchive = nullptr;
+	bool bPerfCsvHeaderWritten = false;
 };

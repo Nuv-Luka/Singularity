@@ -91,6 +91,10 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	float LodTransitionSeconds = 0.45f;
 	/** Cap concurrent fade groups; excess splits fall back to exclusive handoff. */
 	int32 MaxConcurrentTransitionGroups = 24;
+	/** R10 measurement: append one terrain sample per tick to Saved/Logs/PlanetTerrainNextPerf.csv. */
+	bool bPerfCapture = false;
+	/** R10 measurement scenario label written to the CSV. */
+	FString PerfScenario = TEXT("UNSET");
 
 	static FPlanetTerrainNextRuntimeSettings Read();
 };
