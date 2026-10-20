@@ -54,8 +54,10 @@ public:
 
 private:
 	bool EnsureDirectory() const;
-	void PruneToBudget(int64 NeededBytes);
-	int64 EstimateDirectoryBytes() const;
+	bool EnsureDirectory(const FString& InRootDirectory) const;
+	void PruneToBudget(const FString& InRootDirectory, int64 NeededBytes, int64 InMaxBytes);
+	int64 EstimateDirectoryBytes(const FString& InRootDirectory) const;
+	FString FilePathFor(const FString& InRootDirectory, const FPlanetTerrainNextTileId& Id) const;
 	void PumpAsyncSaves();
 	struct FPendingSave
 	{

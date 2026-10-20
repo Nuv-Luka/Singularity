@@ -16,6 +16,14 @@ The descent evidence is **[USER-REPORTED]**: Frame, Game and Input spike togethe
 
 This milestone preserves pooled sections, corrected L1/L2 geometry, quadtree coverage, geological detail projection and the existing fade state machine. It is not a performance recovery claim until a responsive build can be profiled again.
 
+### S2 high-speed descent diagnosis [MEASURED LOCALLY]
+
+The user capture `S2_HighSpeedDescent_Run1` confirms the reported Game-thread stall pattern. Across 549 frames, terrain frame time was median **22.498 ms**, P95/P99 **400 ms**, with **64 frames at or above 100 ms**. The terrain tick `UpdateMs` was median **0.055 ms**, but P95 **802.230 ms** and P99 **1577.241 ms**. The scheduler phase accounted for most of those stalls: `ScheduleMs` P95 **606.357 ms** and P99 **1261.788 ms**, while `MeshBuildMs` P95 was only **2.159 ms** and `CollisionMs` P95 **0.002 ms**. This rules out mesh upload, collision cooking, and GPU work as the primary cause of the observed descent hitches in this run.
+
+The worst frames reached `UpdateMs` **2200.685 ms** / `ScheduleMs` **1820.126 ms** while the scheduler drained newly completed tiles. S2 recorded 222 worker tile bakes and 262 queued disk writes. The source path showed that `TileCache::Insert()` called `DiskTileStore::EnqueueSave()` while the background `Save()` worker held the store mutex across directory enumeration, pruning, serialization, and file I/O. The enqueue therefore remained asynchronous in name but could block the Game thread behind an in-progress save. The recovery fix snapshots the disk configuration and performs all filesystem work outside the shared mutex; the game thread now only performs bounded queue bookkeeping. Automated validation after this change passed **40/40** PlanetTerrainNext tests, including R8 disk persistence, R10 geometry/fade, R9 detail determinism, and scheduler worker stress.
+
+This S2 file is the pre-fix capture and must not be used as an optimized-performance claim. A post-fix descent capture should specifically verify that `ScheduleMs` no longer tracks disk activity and that frame P95/P99 recover during continuous movement.
+
 For an editor that cannot reach the console, the recovery preset can be supplied before startup with `-singularity.TerrainNext.EmergencyMode=1` (or placed in a local startup configuration). It defaults to off and should be removed for normal visual/performance comparisons.
 
 Validation for this milestone: `SingularityEditor Win64 Development` succeeded; R10 geometry/fade automation passed 4/4 in `Saved/Logs/PlanetTerrainNextR10RecoveryMaterialTests.log`; the earlier R9 detail determinism and R8 disk-cache tests also passed after the Game-thread changes.

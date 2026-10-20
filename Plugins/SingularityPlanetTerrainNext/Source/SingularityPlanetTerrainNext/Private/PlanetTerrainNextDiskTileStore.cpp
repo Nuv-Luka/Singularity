@@ -196,10 +196,22 @@ void FPlanetTerrainNextDiskTileStore::BeginFrame()
 
 bool FPlanetTerrainNextDiskTileStore::EnsureDirectory() const
 {
-	return IFileManager::Get().MakeDirectory(*RootDirectory, true);
+	return EnsureDirectory(RootDirectory);
+}
+
+bool FPlanetTerrainNextDiskTileStore::EnsureDirectory(const FString& InRootDirectory) const
+{
+	return IFileManager::Get().MakeDirectory(*InRootDirectory, true);
 }
 
 FString FPlanetTerrainNextDiskTileStore::FilePathFor(const FPlanetTerrainNextTileId& Id) const
+{
+	return FilePathFor(RootDirectory, Id);
+}
+
+FString FPlanetTerrainNextDiskTileStore::FilePathFor(
+	const FString& InRootDirectory,
+	const FPlanetTerrainNextTileId& Id) const
 {
 	// Stable, filesystem-safe name from full identity (not just GetTypeHash — avoid collisions).
 	const FString Name = FString::Printf(
@@ -214,17 +226,17 @@ FString FPlanetTerrainNextDiskTileStore::FilePathFor(const FPlanetTerrainNextTil
 		Id.Node.Y,
 		Id.Resolution,
 		Id.DataFormat);
-	return RootDirectory / Name;
+	return InRootDirectory / Name;
 }
 
-int64 FPlanetTerrainNextDiskTileStore::EstimateDirectoryBytes() const
+int64 FPlanetTerrainNextDiskTileStore::EstimateDirectoryBytes(const FString& InRootDirectory) const
 {
 	int64 Total = 0;
 	TArray<FString> Files;
-	IFileManager::Get().FindFiles(Files, *(RootDirectory / TEXT("*.sptn")), true, false);
+	IFileManager::Get().FindFiles(Files, *(InRootDirectory / TEXT("*.sptn")), true, false);
 	for (const FString& File : Files)
 	{
-		const int64 Size = IFileManager::Get().FileSize(*(RootDirectory / File));
+		const int64 Size = IFileManager::Get().FileSize(*(InRootDirectory / File));
 		if (Size > 0)
 		{
 			Total += Size;
@@ -233,15 +245,18 @@ int64 FPlanetTerrainNextDiskTileStore::EstimateDirectoryBytes() const
 	return Total;
 }
 
-void FPlanetTerrainNextDiskTileStore::PruneToBudget(int64 NeededBytes)
+void FPlanetTerrainNextDiskTileStore::PruneToBudget(
+	const FString& InRootDirectory,
+	int64 NeededBytes,
+	int64 InMaxBytes)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_DiskStore_PruneToBudget);
-	if (MaxBytes <= 0)
+	if (InMaxBytes <= 0)
 	{
 		return;
 	}
-	int64 Total = EstimateDirectoryBytes();
-	if (Total + NeededBytes <= MaxBytes)
+	int64 Total = EstimateDirectoryBytes(InRootDirectory);
+	if (Total + NeededBytes <= InMaxBytes)
 	{
 		return;
 	}
@@ -254,11 +269,11 @@ void FPlanetTerrainNextDiskTileStore::PruneToBudget(int64 NeededBytes)
 	};
 	TArray<FDated> Dated;
 	TArray<FString> Files;
-	IFileManager::Get().FindFiles(Files, *(RootDirectory / TEXT("*.sptn")), true, false);
+	IFileManager::Get().FindFiles(Files, *(InRootDirectory / TEXT("*.sptn")), true, false);
 	Dated.Reserve(Files.Num());
 	for (const FString& File : Files)
 	{
-		const FString Path = RootDirectory / File;
+		const FString Path = InRootDirectory / File;
 		FDated Entry;
 		Entry.Path = Path;
 		Entry.Time = IFileManager::Get().GetTimeStamp(*Path);
@@ -269,7 +284,7 @@ void FPlanetTerrainNextDiskTileStore::PruneToBudget(int64 NeededBytes)
 
 	for (const FDated& Entry : Dated)
 	{
-		if (Total + NeededBytes <= MaxBytes)
+		if (Total + NeededBytes <= InMaxBytes)
 		{
 			break;
 		}
@@ -359,14 +374,32 @@ bool FPlanetTerrainNextDiskTileStore::TryLoad(const FPlanetTerrainNextTileId& Id
 bool FPlanetTerrainNextDiskTileStore::Save(const FPlanetTerrainNextHeightTile& Tile)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_DiskStore_Save_Background);
-	FScopeLock Lock(&Mutex);
-	if (!bEnabled || !Tile.IsValid())
+	if (!Tile.IsValid())
 	{
+		FScopeLock Lock(&Mutex);
 		++Stats.SaveSkipped;
 		return false;
 	}
-	if (!EnsureDirectory())
+
+	// Snapshot mutable configuration, then release the mutex before directory
+	// enumeration, pruning, serialization, and file I/O. EnqueueSave() runs on
+	// the game thread and must never wait for a background save to finish.
+	FString LocalRootDirectory;
+	int64 LocalMaxBytes = 0;
 	{
+		FScopeLock Lock(&Mutex);
+		if (!bEnabled || bShuttingDown)
+		{
+			++Stats.SaveSkipped;
+			return false;
+		}
+		LocalRootDirectory = RootDirectory;
+		LocalMaxBytes = MaxBytes;
+	}
+
+	if (!EnsureDirectory(LocalRootDirectory))
+	{
+		FScopeLock Lock(&Mutex);
 		++Stats.SaveSkipped;
 		return false;
 	}
@@ -393,14 +426,16 @@ bool FPlanetTerrainNextDiskTileStore::Save(const FPlanetTerrainNextHeightTile& T
 	WriteFloatArray(Writer, Tile.FineHeightM);
 	WriteFloatArray(Writer, Tile.CoarseHeightM);
 
-	PruneToBudget(Bytes.Num());
+	PruneToBudget(LocalRootDirectory, Bytes.Num(), LocalMaxBytes);
 
-	const FString Path = FilePathFor(Tile.Id);
+	const FString Path = FilePathFor(LocalRootDirectory, Tile.Id);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
 	{
+		FScopeLock Lock(&Mutex);
 		++Stats.SaveSkipped;
 		return false;
 	}
+	FScopeLock Lock(&Mutex);
 	++Stats.Saves;
 	return true;
 }
