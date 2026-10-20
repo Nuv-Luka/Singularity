@@ -34,6 +34,14 @@ The previous live process sample was diagnostic context only: 5.6–8.2 CPU seco
 
 The current renderer has VSM enabled, masked/two-sided v5 transition material, opaque v4 asset, dithered LOD enabled, legacy CPU morph disabled, and topology-compatible PMC reuse enabled by default. See `PTN_R10_Regression_Inventory.md` for the complete source inventory.
 
+## Safeguard validation after telemetry change
+
+- R10 automation: 4/4 passed (`DiagCollectNodes`, `FlatGeometryL0L1L2`, `HeightGeometryL0L1L2`, `LodFadeComplement`). Log: `Saved/Logs/PlanetTerrainNextR10TelemetryTests.log`.
+- R9 detail determinism: 1/1 passed (`DetailBakeDeterminism`). Log: `Saved/Logs/PlanetTerrainNextR9TelemetryTests.log`.
+- Editor target build: `SingularityEditor Win64 Development` succeeded with UE 5.8.
+
+These are correctness/build checks, not frame-time measurements.
+
 ## Required capture table
 
 | Scenario | Build | Run | Frame P50/P95/P99 | Game P50/P95/P99 | Draw P50/P95/P99 | RHI P50/P95/P99 | GPU P50/P95/P99 | Status |
