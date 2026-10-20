@@ -9,7 +9,7 @@
 
 namespace
 {
-FPlanetTerrainNextDescriptor MoonDesc()
+FPlanetTerrainNextDescriptor MoonDescR10()
 {
 	FPlanetTerrainNextDescriptor D;
 	D.Seed = 3;
@@ -28,7 +28,7 @@ bool FPlanetTerrainNextR101FlatGeometryTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextDescriptor Desc = MoonDesc();
+	const FPlanetTerrainNextDescriptor Desc = MoonDescR10();
 
 	TestEqual(TEXT("index buffer version"), GetIndexBufferVersion(), 3);
 	TestEqual(TEXT("grid tri count"), Indices().Num() / 3, GridN * GridN * 2 + 4 * GridN * 2);
@@ -69,7 +69,7 @@ bool FPlanetTerrainNextR101HeightGeometryTest::RunTest(const FString& Parameters
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDesc());
+	const FPlanetTerrainNextHeightField Field(MoonDescR10());
 
 	for (int32 Face = 0; Face < 6; ++Face)
 	{

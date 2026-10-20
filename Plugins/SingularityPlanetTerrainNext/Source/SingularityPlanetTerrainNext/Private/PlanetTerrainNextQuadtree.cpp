@@ -23,7 +23,7 @@ struct FPlanetTerrainNextQuadtree::FNode
 
 namespace
 {
-FORCEINLINE double AngleBetweenUnit(const FVector3d& A, const FVector3d& B)
+FORCEINLINE double QuadtreeAngleBetweenUnit(const FVector3d& A, const FVector3d& B)
 {
 	return FMath::Atan2(FVector3d::CrossProduct(A, B).Length(), FVector3d::DotProduct(A, B));
 }
@@ -68,7 +68,7 @@ void FPlanetTerrainNextQuadtree::MakeNode(FNode& Node, const FPlanetTerrainNextN
 	{
 		for (double V : Vs)
 		{
-			MaxAngle = FMath::Max(MaxAngle, AngleBetweenUnit(Node.CenterDir, PlanetTerrainNext::FacePoint(Id.Face, U, V)));
+			MaxAngle = FMath::Max(MaxAngle, QuadtreeAngleBetweenUnit(Node.CenterDir, PlanetTerrainNext::FacePoint(Id.Face, U, V)));
 		}
 	}
 	Node.AngularRadius = MaxAngle;
@@ -142,7 +142,7 @@ bool FPlanetTerrainNextQuadtree::IsVisible(const FNode& Node, const FPlanetTerra
 
 	const double CameraRadius = View.CameraM.Length();
 	const FVector3d CameraDir = CameraRadius > 0.0 ? View.CameraM / CameraRadius : FVector3d::UnitZ();
-	const double AngleGap = FMath::Max(0.0, AngleBetweenUnit(CameraDir, Node.CenterDir) - Node.AngularRadius);
+	const double AngleGap = FMath::Max(0.0, QuadtreeAngleBetweenUnit(CameraDir, Node.CenterDir) - Node.AngularRadius);
 
 	const double Altitude = FMath::Max(0.0, CameraRadius - RadiusM);
 	if (AngleGap * RadiusM <= FMath::Max(Settings.SafetyRadiusMinM, Altitude))
@@ -166,7 +166,7 @@ bool FPlanetTerrainNextQuadtree::IsVisible(const FNode& Node, const FPlanetTerra
 	}
 
 	const double HalfAngle = FMath::Asin(FMath::Clamp(Node.BoundRadiusM / Distance, 0.0, 1.0));
-	const double ToCenterAngle = AngleBetweenUnit(View.Forward.GetSafeNormal(), ToCenter / Distance);
+	const double ToCenterAngle = QuadtreeAngleBetweenUnit(View.Forward.GetSafeNormal(), ToCenter / Distance);
 	return ToCenterAngle - HalfAngle <= View.HalfDiagonalFovRad;
 }
 
@@ -193,7 +193,7 @@ double FPlanetTerrainNextQuadtree::WeightedPixelError(
 	{
 		return Base;
 	}
-	const double ToCenterAngle = AngleBetweenUnit(View.Forward.GetSafeNormal(), ToCenter / Distance);
+	const double ToCenterAngle = QuadtreeAngleBetweenUnit(View.Forward.GetSafeNormal(), ToCenter / Distance);
 	const double HalfFov = FMath::Max(View.HalfDiagonalFovRad, 1.0e-3);
 	const double Edge = FMath::Clamp(ToCenterAngle / HalfFov, 0.0, 1.0);
 	// Smooth center→rim: full error on-axis, Scale·error at the frustum edge.

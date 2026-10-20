@@ -44,7 +44,7 @@ double Fade(double T)
 	return T * T * T * (T * (T * 6.0 - 15.0) + 10.0);
 }
 
-double Lerp(double A, double B, double T)
+double TileLerp(double A, double B, double T)
 {
 	return A + (B - A) * T;
 }
@@ -90,11 +90,11 @@ double GradientNoise3(uint64 Seed, FDir P)
 			}
 		}
 	}
-	const double C00 = Lerp(Corners[0], Corners[1], U);
-	const double C01 = Lerp(Corners[2], Corners[3], U);
-	const double C10 = Lerp(Corners[4], Corners[5], U);
-	const double C11 = Lerp(Corners[6], Corners[7], U);
-	return Lerp(Lerp(C00, C01, V), Lerp(C10, C11, V), W);
+	const double C00 = TileLerp(Corners[0], Corners[1], U);
+	const double C01 = TileLerp(Corners[2], Corners[3], U);
+	const double C10 = TileLerp(Corners[4], Corners[5], U);
+	const double C11 = TileLerp(Corners[6], Corners[7], U);
+	return TileLerp(TileLerp(C00, C01, V), TileLerp(C10, C11, V), W);
 }
 
 double Noise3Dir(uint64 Seed, FDir Direction, double Freq)

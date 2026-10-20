@@ -15,7 +15,7 @@
 
 namespace
 {
-FPlanetTerrainNextDescriptor MoonDescriptor()
+FPlanetTerrainNextDescriptor MoonDescriptorR8()
 {
 	FPlanetTerrainNextDescriptor Descriptor;
 	Descriptor.Seed = 3;
@@ -43,7 +43,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextPeripheralLodTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR8());
 	TArray<double> GE;
 	GE.SetNum(18);
 	for (int32 L = 0; L <= 17; ++L)
@@ -104,7 +104,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextCameraTurnCoverageTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR8());
 	TArray<double> GE;
 	GE.SetNum(18);
 	for (int32 L = 0; L <= 17; ++L)
@@ -194,7 +194,7 @@ bool FPlanetTerrainNextPeripheralDisabledParityTest::RunTest(const FString& Para
 {
 	(void)Parameters;
 	// Scale=1 must match raw PE (no bias) for a node on the view axis.
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR8());
 	TArray<double> GE;
 	GE.SetNum(8);
 	for (int32 L = 0; L < 8; ++L)
@@ -276,7 +276,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextHorizonSlackTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR8());
 	TArray<double> GE;
 	GE.SetNum(4);
 	for (int32 L = 0; L < 4; ++L)

@@ -10,7 +10,7 @@
 
 namespace
 {
-FPlanetTerrainNextDescriptor MoonDescriptor(int64 Seed = 1)
+FPlanetTerrainNextDescriptor MoonDescriptorR4(int64 Seed = 1)
 {
 	FPlanetTerrainNextDescriptor Descriptor;
 	Descriptor.Seed = Seed;
@@ -33,7 +33,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextTileIdentityTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextDescriptor Desc = MoonDescriptor();
+	const FPlanetTerrainNextDescriptor Desc = MoonDescriptorR4();
 	const FPlanetTerrainNextHeightField Field(Desc);
 	const FPlanetTerrainNextNodeId Node(2, 4, 3, 5);
 
@@ -66,7 +66,7 @@ bool FPlanetTerrainNextHeightTileBakeTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextDescriptor Desc = MoonDescriptor();
+	const FPlanetTerrainNextDescriptor Desc = MoonDescriptorR4();
 	const FPlanetTerrainNextHeightField Field(Desc);
 	const FPlanetTerrainNextNodeId Node(4, 3, 1, 2);
 	const FPlanetTerrainNextTileId Id = TileFor(Field, Desc, Node);
@@ -115,7 +115,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextTileCacheTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextDescriptor Desc = MoonDescriptor();
+	const FPlanetTerrainNextDescriptor Desc = MoonDescriptorR4();
 	const FPlanetTerrainNextHeightField Field(Desc);
 	FPlanetTerrainNextTileCache Cache(4);
 	Cache.BeginFrame();
@@ -163,7 +163,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextGpuSlotPoolTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextDescriptor Desc = MoonDescriptor();
+	const FPlanetTerrainNextDescriptor Desc = MoonDescriptorR4();
 	const FPlanetTerrainNextHeightField Field(Desc);
 
 	FPlanetTerrainNextGpuSlotPool Pool;

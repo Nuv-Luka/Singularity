@@ -9,7 +9,7 @@
 
 namespace
 {
-FPlanetTerrainNextDescriptor MoonDesc()
+FPlanetTerrainNextDescriptor MoonDescR9()
 {
 	FPlanetTerrainNextDescriptor D;
 	D.Seed = 3;
@@ -33,7 +33,7 @@ bool FPlanetTerrainNextR91MorphUvPrecisionTest::RunTest(const FString& Parameter
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDesc());
+	const FPlanetTerrainNextHeightField Field(MoonDescR9());
 	double WorstDecodeM = 0.0;
 	double MaxAbsSeenCm = 0.0;
 	bool bSawCoarseOverflowRisk = false;
@@ -97,7 +97,7 @@ bool FPlanetTerrainNextR91SkirtWindingTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDesc());
+	const FPlanetTerrainNextHeightField Field(MoonDescR9());
 	const TArray<int32>& Idx = Indices();
 	const int32 GridTris = GridN * GridN * 2;
 	const int32 SkirtTris = 4 * GridN * 2;
@@ -134,7 +134,7 @@ bool FPlanetTerrainNextR91FiniteAttributesTest::RunTest(const FString& Parameter
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDesc());
+	const FPlanetTerrainNextHeightField Field(MoonDescR9());
 	for (int32 Face = 0; Face < 6; ++Face)
 	{
 		for (const int32 Level : {0, 1})
@@ -163,9 +163,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextR93DetailBakeDeterminismTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDesc());
+	const FPlanetTerrainNextHeightField Field(MoonDescR9());
 	const FPlanetTerrainNextDetailTileId Id = FPlanetTerrainNextDetailTileId::MakeRoot(
-		MoonDesc().PlanetId, Field.GetIdentityHash(), 0, 64);
+		MoonDescR9().PlanetId, Field.GetIdentityHash(), 0, 64);
 
 	FPlanetTerrainNextDetailTile A;
 	FPlanetTerrainNextDetailTile B;

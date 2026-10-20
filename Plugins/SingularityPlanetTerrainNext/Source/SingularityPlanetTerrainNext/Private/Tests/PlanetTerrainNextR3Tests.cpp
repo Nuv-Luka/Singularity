@@ -9,7 +9,7 @@
 
 namespace
 {
-FPlanetTerrainNextDescriptor MoonDescriptor(int64 Seed = 1)
+FPlanetTerrainNextDescriptor MoonDescriptorR3(int64 Seed = 1)
 {
 	FPlanetTerrainNextDescriptor Descriptor;
 	Descriptor.Seed = Seed;
@@ -52,7 +52,7 @@ bool FPlanetTerrainNextParentCompatibleTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR3());
 
 	double WorstEven = 0.0;
 	double WorstMid = 0.0;
@@ -126,7 +126,7 @@ bool FPlanetTerrainNextMorphHandoffTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR3());
 
 	// Parent→children handoff: at Morph=1 every child vertex that lands on the parent
 	// grid (even I,J) matches the parent vertex, and T-junction midpoints lie on parent edges.
@@ -185,7 +185,7 @@ bool FPlanetTerrainNextNoMeshRebuildInvariantTest::RunTest(const FString& Parame
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR3());
 	FPlanetTerrainNextPatchData Patch;
 	Build(Field, FPlanetTerrainNextNodeId(2, 5, 3, 7), 5.0, Patch);
 

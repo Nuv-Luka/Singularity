@@ -11,7 +11,7 @@ namespace
 {
 using namespace PlanetTerrainNext;
 
-FPlanetTerrainNextDescriptor MoonDescriptor(int64 Seed = 1)
+FPlanetTerrainNextDescriptor MoonDescriptorR2(int64 Seed = 1)
 {
 	FPlanetTerrainNextDescriptor Descriptor;
 	Descriptor.Seed = Seed;
@@ -248,9 +248,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextHeightFieldTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField A(MoonDescriptor(1));
-	const FPlanetTerrainNextHeightField B(MoonDescriptor(1));
-	const FPlanetTerrainNextHeightField Other(MoonDescriptor(2));
+	const FPlanetTerrainNextHeightField A(MoonDescriptorR2(1));
+	const FPlanetTerrainNextHeightField B(MoonDescriptorR2(1));
+	const FPlanetTerrainNextHeightField Other(MoonDescriptorR2(2));
 
 	FRandomStream Random(77);
 	int32 Different = 0;
@@ -333,7 +333,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextQuadtreeCoverageTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR2());
 
 	struct FCase
 	{
@@ -390,7 +390,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextQuadtreeBudgetTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR2());
 	const FVector3d Corner(1.0, 1.0, 1.0);
 
 	{
@@ -448,7 +448,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextLodProfileTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR2());
 	for (const double Target : {2.0, 4.0, 8.0})
 	{
 		for (const double Altitude : {1.0e5, 1.0e4, 1.0e3, 100.0, 10.0})
@@ -491,7 +491,7 @@ bool FPlanetTerrainNextPatchTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 	using namespace PlanetTerrainNextPatch;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR2());
 	const double R = Field.GetRadiusMeters();
 	const TArray<int32>& Indices = PlanetTerrainNextPatch::Indices();
 

@@ -10,7 +10,7 @@
 
 namespace
 {
-FPlanetTerrainNextDescriptor MoonDescriptor(int64 Seed = 1)
+FPlanetTerrainNextDescriptor MoonDescriptorR6(int64 Seed = 1)
 {
 	FPlanetTerrainNextDescriptor Descriptor;
 	Descriptor.Seed = Seed;
@@ -83,7 +83,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextCollisionSampleTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextDescriptor Desc = MoonDescriptor();
+	const FPlanetTerrainNextDescriptor Desc = MoonDescriptorR6();
 	const FPlanetTerrainNextHeightField Field(Desc);
 	FPlanetTerrainNextCollisionManager Manager;
 	FPlanetTerrainNextCollisionSettings Settings;
@@ -128,7 +128,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextCollisionResidencyTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextDescriptor Desc = MoonDescriptor();
+	const FPlanetTerrainNextDescriptor Desc = MoonDescriptorR6();
 	const FPlanetTerrainNextHeightField Field(Desc);
 	FPlanetTerrainNextCollisionManager Manager;
 	FPlanetTerrainNextCollisionSettings Settings;
@@ -184,7 +184,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FPlanetTerrainNextShadowBoundsTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-	const FPlanetTerrainNextHeightField Field(MoonDescriptor());
+	const FPlanetTerrainNextHeightField Field(MoonDescriptorR6());
 	FPlanetTerrainNextPatchData Patch;
 	PlanetTerrainNextPatch::Build(Field, FPlanetTerrainNextNodeId(0, 4, 3, 5), 2.0, Patch);
 
