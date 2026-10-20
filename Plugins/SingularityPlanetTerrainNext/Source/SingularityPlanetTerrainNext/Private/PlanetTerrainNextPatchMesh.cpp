@@ -107,18 +107,24 @@ FVector3d BilinearParent(const TArray<FVector3d>& Grid, double U, double V)
 
 } // namespace
 
+constexpr int32 IndexBufferVersionValue = 3;
+
 const TArray<int32>& Indices()
 {
 	// Versioned so Live Coding / hot reload picks up skirt winding fixes.
-	constexpr int32 IndexBufferVersion = 3;
 	static int32 BuiltVersion = -1;
 	static TArray<int32> Shared;
-	if (BuiltVersion != IndexBufferVersion)
+	if (BuiltVersion != IndexBufferVersionValue)
 	{
 		Shared = MakeIndices();
-		BuiltVersion = IndexBufferVersion;
+		BuiltVersion = IndexBufferVersionValue;
 	}
 	return Shared;
+}
+
+int32 GetIndexBufferVersion()
+{
+	return IndexBufferVersionValue;
 }
 
 double VertexSpacingMeters(double RadiusM, int32 Level)
@@ -177,6 +183,97 @@ void Build(
 		return;
 	}
 	BuildFromTile(HeightField, Tile, SkirtDepthM, Out);
+}
+
+void BuildFlat(
+	double RadiusM,
+	const FPlanetTerrainNextNodeId& Id,
+	double SkirtDepthM,
+	FPlanetTerrainNextPatchData& Out)
+{
+	Out = FPlanetTerrainNextPatchData();
+	Out.Id = Id;
+	Out.SkirtDepthM = SkirtDepthM;
+	Out.OriginM = PlanetTerrainNext::FacePoint(
+		Id.Face, 0.5 * (Id.U0() + Id.U1()), 0.5 * (Id.V0() + Id.V1())) * RadiusM;
+	Out.MinHeightM = 0.0;
+	Out.MaxHeightM = 0.0;
+	Out.MaxAbsCoarseDeltaCm = 0.0;
+
+	Out.VerticesCm.SetNumUninitialized(VertexCount);
+	Out.CoarseVerticesCm.SetNumUninitialized(VertexCount);
+	Out.Normals.SetNumUninitialized(VertexCount);
+	Out.CoarseNormals.SetNumUninitialized(VertexCount);
+	Out.Tangents.SetNumUninitialized(VertexCount);
+	Out.UVs.SetNumUninitialized(VertexCount);
+	Out.UV1.SetNumUninitialized(VertexCount);
+	Out.UV2.SetNumUninitialized(VertexCount);
+	Out.VertexColors.SetNumUninitialized(VertexCount);
+
+	TArray<FVector3d> Halo;
+	TArray<FVector3d> HaloDirs;
+	Halo.SetNumUninitialized(HaloRow * HaloRow);
+	HaloDirs.SetNumUninitialized(HaloRow * HaloRow);
+	for (int32 J = -1; J <= GridN + 1; ++J)
+	{
+		for (int32 I = -1; I <= GridN + 1; ++I)
+		{
+			const FVector3d Dir = VertexDirection(Id, I, J);
+			const int32 H = HaloIndex(I, J);
+			HaloDirs[H] = Dir;
+			Halo[H] = Dir * RadiusM - Out.OriginM;
+		}
+	}
+
+	auto Emit = [&](int32 Index, const FVector3d& Pos, const FVector3d& N, const FVector3d& T, const FVector2D& UV)
+	{
+		const FVector Cm(Pos * PlanetTerrainNext::CmPerMeter);
+		Out.VerticesCm[Index] = Cm;
+		Out.CoarseVerticesCm[Index] = Cm;
+		Out.Normals[Index] = FVector(N);
+		Out.CoarseNormals[Index] = FVector(N);
+		Out.Tangents[Index] = FVector(T);
+		Out.UVs[Index] = UV;
+		Out.UV1[Index] = FVector2D::ZeroVector;
+		Out.UV2[Index] = FVector2D::ZeroVector;
+		Out.VertexColors[Index] = FLinearColor(
+			static_cast<float>(N.X * 0.5 + 0.5),
+			static_cast<float>(N.Y * 0.5 + 0.5),
+			static_cast<float>(N.Z * 0.5 + 0.5),
+			1.0f);
+	};
+
+	for (int32 J = 0; J <= GridN; ++J)
+	{
+		for (int32 I = 0; I <= GridN; ++I)
+		{
+			const int32 H = HaloIndex(I, J);
+			const FVector3d DU = Halo[HaloIndex(I + 1, J)] - Halo[HaloIndex(I - 1, J)];
+			const FVector3d DV = Halo[HaloIndex(I, J + 1)] - Halo[HaloIndex(I, J - 1)];
+			FVector3d N = FVector3d::CrossProduct(DU, DV).GetSafeNormal();
+			if (N.IsNearlyZero() || FVector3d::DotProduct(N, HaloDirs[H]) < 0.0)
+			{
+				N = HaloDirs[H];
+			}
+			const FVector3d T = DU.GetSafeNormal();
+			Emit(GridIndex(I, J), Halo[H], N, T,
+				FVector2D(static_cast<double>(I) / GridN, static_cast<double>(J) / GridN));
+		}
+	}
+
+	for (int32 Edge = 0; Edge < 4; ++Edge)
+	{
+		for (int32 K = 0; K <= GridN; ++K)
+		{
+			const int32 Top = EdgeGridIndex(Edge, K);
+			const int32 I = Top % Row;
+			const int32 J = Top / Row;
+			const FVector3d Down = HaloDirs[HaloIndex(I, J)] * SkirtDepthM;
+			const int32 Bottom = GridVertexCount + Edge * Row + K;
+			Emit(Bottom, Halo[HaloIndex(I, J)] - Down,
+				FVector3d(Out.Normals[Top]), FVector3d(Out.Tangents[Top]), Out.UVs[Top]);
+		}
+	}
 }
 
 void BuildFromTile(

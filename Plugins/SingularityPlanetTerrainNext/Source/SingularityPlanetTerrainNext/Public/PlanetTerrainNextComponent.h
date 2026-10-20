@@ -17,6 +17,7 @@
 #include "PlanetTerrainNextComponent.generated.h"
 
 class UMaterialInstanceDynamic;
+class UMaterialInterface;
 class UProceduralMeshComponent;
 class UTexture2D;
 struct FPlanetTerrainNextPatchData;
@@ -81,6 +82,11 @@ struct FPlanetTerrainNextFrameStats
 	int32 DetailBaking = 0;
 	int32 DetailUploads = 0;
 	double DetailBakeP95Ms = 0.0;
+	/** R10.1 diagnostic */
+	bool bDiagActive = false;
+	int32 DiagPatches = 0;
+	int32 DiagInvalidTris = 0;
+	int32 DiagInwardFacing = 0;
 };
 
 /**
@@ -177,14 +183,22 @@ private:
 		bool bInUse = false;
 		bool bHasSection = false;
 		bool bShown = false;
+		/** Matches PlanetTerrainNextPatch::GetIndexBufferVersion() at last Create. */
+		int32 IndexBufferVersion = -1;
 	};
 
 	FPlanetTerrainNextTileId MakeTileId(const FPlanetTerrainNextNodeId& Id) const;
 	int32 AcquireSlot();
 	void ReleaseNode(const FPlanetTerrainNextNodeId& Id);
+	void ClearSlotSection(FSlot& Slot);
 	bool BuildNode(const FPlanetTerrainNextNodeId& Id);
+	bool BuildDiagNode(const FPlanetTerrainNextNodeId& Id, bool bFlat, bool bForceFresh, UMaterialInterface* DiagMaterial);
 	void UploadPatch(FSlot& Slot, const FPlanetTerrainNextPatchData& Patch);
 	void UploadCpuMorphedSection(FSlot& Slot);
+	/** bAllowForceFresh: true on BuildNode upload; false on per-frame morph Update. */
+	bool ShouldRecreateSection(const FSlot& Slot, bool bAllowForceFresh) const;
+	void TickDiagnostic(float DeltaSeconds);
+	void ApplySuspendedProxyVisibility(bool bShowProxy);
 	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet);
 	bool CheckDrawCoverage(const TArray<FPlanetTerrainNextDrawItem>& DrawSet) const;
 	/** Morph only patches that are actually shown after handoff (R9.2). */
@@ -252,4 +266,7 @@ private:
 	bool bSuspended = false;
 	/** Last frame's DetailProjection CVar — detect toggles for MID refresh. */
 	bool bDetailProjectionLive = false;
+	/** R10.1: last diag rebuild key; INDEX_NONE when diag off. */
+	uint32 DiagRebuildKey = 0;
+	bool bDiagWasEnabled = false;
 };

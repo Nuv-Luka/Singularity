@@ -1,6 +1,7 @@
 #include "PlanetTerrainNextComponent.h"
 
 #include "PlanetTerrainNextCoordinates.h"
+#include "PlanetTerrainNextDiag.h"
 #include "PlanetTerrainNextHeightTile.h"
 #include "PlanetTerrainNextLog.h"
 #include "PlanetTerrainNextMorphMaterial.h"
@@ -464,8 +465,54 @@ void UPlanetTerrainNextComponent::ReleaseNode(const FPlanetTerrainNextNodeId& Id
 	Slot.Tangents.Reset();
 	Slot.BaseUVs.Reset();
 	Slot.BaseColors.Reset();
+	// R10.1: UpdateMeshSection never rewrites indices — drop the section so the next
+	// BuildNode CreateMeshSection installs the current IndexBufferVersion.
+	ClearSlotSection(Slot);
 	Drawn.Remove(Id);
 	FreeSlots.Add(SlotIndex);
+}
+
+void UPlanetTerrainNextComponent::ClearSlotSection(FSlot& Slot)
+{
+	if (Slot.Mesh && Slot.bHasSection)
+	{
+		Slot.Mesh->ClearMeshSection(0);
+	}
+	Slot.bHasSection = false;
+	Slot.IndexBufferVersion = -1;
+}
+
+bool UPlanetTerrainNextComponent::ShouldRecreateSection(const FSlot& Slot, bool bAllowForceFresh) const
+{
+	if (!Slot.bHasSection)
+	{
+		return true;
+	}
+	if (Slot.IndexBufferVersion != PlanetTerrainNextPatch::GetIndexBufferVersion())
+	{
+		return true;
+	}
+	if (bAllowForceFresh && Settings.bForceFreshMeshSection)
+	{
+		return true;
+	}
+	return false;
+}
+
+void UPlanetTerrainNextComponent::ApplySuspendedProxyVisibility(bool bShowProxy)
+{
+	if (!SuspendedProxy.IsValid())
+	{
+		return;
+	}
+	SuspendedProxy->SetVisibility(bShowProxy);
+	// Patches are non-occluders; a visible shell must not occlude them. When Next is
+	// active the shell stays hidden and non-occluding even if a race flips visibility.
+	SuspendedProxy->SetCanEverAffectNavigation(false);
+	if (UPrimitiveComponent* Prim = SuspendedProxy.Get())
+	{
+		Prim->bUseAsOccluder = bShowProxy;
+	}
 }
 
 bool UPlanetTerrainNextComponent::BuildNode(const FPlanetTerrainNextNodeId& Id)
@@ -605,8 +652,9 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 			Tangents.Add(FProcMeshTangent(Tangent, false));
 		}
 
-		if (!Slot.bHasSection)
+		if (ShouldRecreateSection(Slot, true))
 		{
+			ClearSlotSection(Slot);
 			Slot.Mesh->CreateMeshSection_LinearColor(
 				0,
 				Patch.VerticesCm,
@@ -624,6 +672,7 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 				Slot.Mesh->SetMaterial(0, Slot.Material);
 			}
 			Slot.bHasSection = true;
+			Slot.IndexBufferVersion = PlanetTerrainNextPatch::GetIndexBufferVersion();
 		}
 		else
 		{
@@ -690,8 +739,10 @@ void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
 		Tangents.Add(FProcMeshTangent(Tangent, false));
 	}
 
-	if (!Slot.bHasSection)
+	// Morph animation Updates in place; recreate only if section missing or index version stale.
+	if (ShouldRecreateSection(Slot, false))
 	{
+		ClearSlotSection(Slot);
 		Slot.Mesh->CreateMeshSection_LinearColor(
 			0,
 			Positions,
@@ -709,6 +760,7 @@ void UPlanetTerrainNextComponent::UploadCpuMorphedSection(FSlot& Slot)
 			Slot.Mesh->SetMaterial(0, Slot.Material);
 		}
 		Slot.bHasSection = true;
+		Slot.IndexBufferVersion = PlanetTerrainNextPatch::GetIndexBufferVersion();
 	}
 	else
 	{
@@ -1294,20 +1346,14 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		if (!bSuspended)
 		{
 			HideAll();
-			if (SuspendedProxy.IsValid())
-			{
-				SuspendedProxy->SetVisibility(true);
-			}
+			ApplySuspendedProxyVisibility(true);
 			bSuspended = true;
 		}
 		return;
 	}
 	if (bSuspended || (SuspendedProxy.IsValid() && SuspendedProxy->IsVisible()))
 	{
-		if (SuspendedProxy.IsValid())
-		{
-			SuspendedProxy->SetVisibility(false);
-		}
+		ApplySuspendedProxyVisibility(false);
 		bSuspended = false;
 	}
 
@@ -1316,6 +1362,35 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	if (!TileCache.IsValid() || !GpuPool.IsValid() || !Scheduler.IsValid() || !HeightField.IsValid())
 	{
 		return;
+	}
+
+	const FPlanetTerrainNextDiagSettings Diag = FPlanetTerrainNextDiagSettings::Read();
+	if (Diag.bEnable)
+	{
+		TickDiagnostic(DeltaTime);
+		FrameStats.UpdateMs = (FPlatformTime::Seconds() - TickStart) * 1000.0;
+		if (Settings.bShowStats)
+		{
+			PrintStats();
+		}
+		return;
+	}
+	if (bDiagWasEnabled)
+	{
+		// Leaving diag: drop diag-only residency so normal streaming rebuilds cleanly.
+		TArray<FPlanetTerrainNextNodeId> ToRelease;
+		ToRelease.Reserve(Resident.Num());
+		for (const TPair<FPlanetTerrainNextNodeId, int32>& Pair : Resident)
+		{
+			ToRelease.Add(Pair.Key);
+		}
+		for (const FPlanetTerrainNextNodeId& Id : ToRelease)
+		{
+			ReleaseNode(Id);
+		}
+		bDiagWasEnabled = false;
+		DiagRebuildKey = 0;
+		FrameStats.bDiagActive = false;
 	}
 	TileCache->SetMaxEntries(Settings.CpuTileCacheSize);
 	if (DiskTileStore.IsValid())
@@ -1520,11 +1595,149 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	}
 	FrameStats.AltitudeM = CollisionManager.SampleAltitudeM(*HeightField, View.CameraM);
 	FrameStats.UpdateMs = (FPlatformTime::Seconds() - TickStart) * 1000.0;
+	FrameStats.bDiagActive = false;
 
 	if (Settings.bShowStats)
 	{
 		PrintStats();
 	}
+}
+
+bool UPlanetTerrainNextComponent::BuildDiagNode(
+	const FPlanetTerrainNextNodeId& Id,
+	bool bFlat,
+	bool bForceFresh,
+	UMaterialInterface* DiagMaterial)
+{
+	if (!HeightField.IsValid() || Resident.Contains(Id))
+	{
+		return false;
+	}
+
+	const int32 SlotIndex = AcquireSlot();
+	if (SlotIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	FPlanetTerrainNextPatchData Patch;
+	if (bFlat)
+	{
+		PlanetTerrainNextPatch::BuildFlat(Descriptor.RadiusMeters, Id, 0.0, Patch);
+	}
+	else
+	{
+		PlanetTerrainNextPatch::Build(*HeightField, Id, 0.0, Patch);
+	}
+
+	FSlot& Slot = Slots[SlotIndex];
+	Slot.Id = Id;
+	Slot.TileId = MakeTileId(Id);
+	Slot.GpuSlot = INDEX_NONE;
+	Slot.bInUse = true;
+	Slot.Morph = 0.0f;
+	Slot.MorphReveal = 1.0f;
+	Slot.MaxAbsCoarseDeltaCm = 0.0;
+	Slot.bCpuMorph = false;
+
+	const bool bSavedForce = Settings.bForceFreshMeshSection;
+	Settings.bForceFreshMeshSection = bForceFresh;
+	UploadPatch(Slot, Patch);
+	Settings.bForceFreshMeshSection = bSavedForce;
+
+	if (DiagMaterial && Slot.Mesh)
+	{
+		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(DiagMaterial, Slot.Mesh);
+		if (Mid)
+		{
+			Mid->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.78f, 0.74f, 0.70f, 1.0f));
+			Slot.Material = Mid;
+			if (SlotMaterials.IsValidIndex(SlotIndex))
+			{
+				SlotMaterials[SlotIndex] = Mid;
+			}
+			Slot.Mesh->SetMaterial(0, Mid);
+		}
+	}
+
+	Slot.Mesh->SetVisibility(true);
+	Slot.Mesh->SetCastShadow(false);
+	Slot.bShown = true;
+	Resident.Add(Id, SlotIndex);
+	Drawn.Add(Id);
+	return true;
+}
+
+void UPlanetTerrainNextComponent::TickDiagnostic(float DeltaSeconds)
+{
+	(void)DeltaSeconds;
+	bDiagWasEnabled = true;
+	ApplySuspendedProxyVisibility(false);
+
+	const FPlanetTerrainNextDiagSettings Diag = FPlanetTerrainNextDiagSettings::Read();
+	const uint32 Key = Diag.GetRebuildKey();
+	FrameStats.bDiagActive = true;
+
+	if (Key != DiagRebuildKey)
+	{
+		TArray<FPlanetTerrainNextNodeId> ToRelease;
+		ToRelease.Reserve(Resident.Num());
+		for (const TPair<FPlanetTerrainNextNodeId, int32>& Pair : Resident)
+		{
+			ToRelease.Add(Pair.Key);
+		}
+		for (const FPlanetTerrainNextNodeId& Id : ToRelease)
+		{
+			ReleaseNode(Id);
+		}
+		Drawn.Reset();
+		HandoffHoldFrames.Reset();
+
+		UMaterialInterface* DiagMat = PlanetTerrainNextDiag::GetOrCreateMaterial(Diag.bTwoSided);
+		TArray<FPlanetTerrainNextNodeId> Nodes;
+		PlanetTerrainNextDiag::CollectNodes(Diag, Nodes);
+
+		int32 Built = 0;
+		int32 Invalid = 0;
+		int32 Inward = 0;
+		for (const FPlanetTerrainNextNodeId& Id : Nodes)
+		{
+			if (!BuildDiagNode(Id, !Diag.bHeight, Diag.bForceFreshSection, DiagMat))
+			{
+				continue;
+			}
+			++Built;
+			FPlanetTerrainNextPatchData Check;
+			if (Diag.bHeight)
+			{
+				PlanetTerrainNextPatch::Build(*HeightField, Id, 0.0, Check);
+			}
+			else
+			{
+				PlanetTerrainNextPatch::BuildFlat(Descriptor.RadiusMeters, Id, 0.0, Check);
+			}
+			const FPlanetTerrainNextPatchValidation V = PlanetTerrainNextDiag::ValidatePatch(Check, false);
+			Invalid += V.InvalidIndexCount + V.DegenerateTriangleCount + V.NonFiniteVertexCount;
+			Inward += V.InwardFacingGridCount;
+		}
+
+		DiagRebuildKey = Key;
+		FrameStats.DiagPatches = Built;
+		FrameStats.DiagInvalidTris = Invalid;
+		FrameStats.DiagInwardFacing = Inward;
+		FrameStats.Drawn = Drawn.Num();
+		FrameStats.Resident = Resident.Num();
+		FrameStats.bDrawCoverageOk = Invalid == 0 && Inward == 0 && Built == Nodes.Num();
+		UE_LOG(LogPlanetTerrainNext, Log,
+			TEXT("R10.1 Diag rebuild mode=%d level=%d height=%d patches=%d/%d invalid=%d inward=%d fresh=%d"),
+			static_cast<int32>(Diag.Mode), Diag.Level, Diag.bHeight ? 1 : 0,
+			Built, Nodes.Num(), Invalid, Inward, Diag.bForceFreshSection ? 1 : 0);
+	}
+
+	FrameStats.Drawn = Drawn.Num();
+	FrameStats.Resident = Resident.Num();
+	FrameStats.DetailReadyFaces = 0;
+	FrameStats.DetailPending = 0;
 }
 
 void UPlanetTerrainNextComponent::PrintStats() const
@@ -1534,6 +1747,18 @@ void UPlanetTerrainNextComponent::PrintStats() const
 		return;
 	}
 	const FPlanetTerrainNextFrameStats& S = FrameStats;
+	if (S.bDiagActive)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			static_cast<uint64>(GetUniqueID()) + 0x7E77A000ull,
+			0.0f,
+			S.bDrawCoverageOk ? FColor(140, 230, 140) : FColor::Red,
+			FString::Printf(
+				TEXT("TerrainNext R10 DIAG | patches %d | invalid %d inward %d | cov %s | tick diag (streaming off)"),
+				S.DiagPatches, S.DiagInvalidTris, S.DiagInwardFacing,
+				S.bDrawCoverageOk ? TEXT("ok") : TEXT("FAIL")));
+		return;
+	}
 	const FString AltitudeText = FMath::Abs(S.AltitudeM) >= 10000.0
 		? FString::Printf(TEXT("%.1f km"), S.AltitudeM / 1000.0)
 		: FString::Printf(TEXT("%.1f m"), S.AltitudeM);
@@ -1542,7 +1767,7 @@ void UPlanetTerrainNextComponent::PrintStats() const
 		0.0f,
 		HasFullCoverage() ? FColor(140, 230, 140) : FColor::Red,
 		FString::Printf(
-			TEXT("TerrainNext R9 | alt %s | drawn %d L%d (L0:%d L1:%d L2:%d L3+:%d) handoff %d | cov %s | detail %d/6 p%d | disk %d/%d w%d | morph %.2f | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f | tick %.2f ms"),
+			TEXT("TerrainNext R10 | alt %s | drawn %d L%d (L0:%d L1:%d L2:%d L3+:%d) handoff %d | cov %s | detail %d/6 p%d | disk %d/%d w%d | morph %.2f | coll %d/%d | tree %.2f sch %.2f mesh %.2f coll %.2f | tick %.2f ms"),
 			*AltitudeText, S.Drawn, S.MaxDrawnLevel,
 			S.DrawnL0, S.DrawnL1, S.DrawnL2, S.DrawnL3Plus, S.HandoffParentsKept,
 			S.bDrawCoverageOk ? TEXT("ok") : TEXT("HOLE"),

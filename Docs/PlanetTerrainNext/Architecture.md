@@ -1,6 +1,6 @@
 # Planet Terrain Next — architecture
 
-**Milestone:** R9.2 (morph↔visibility sync). R9.1 L0–L2 holes open. R7 deferred. See `R9_Status.md`.
+**Milestone:** R10.1 (geometry correctness). See `R10_Status.md`. R7 deferred.
 
 **Scope:** one airless rocky moon. No atmosphere, ocean, ice tectonics, foliage, planetary rotation, or a second landable body.
 
@@ -41,7 +41,9 @@ The console command `singularity.TerrainNext.SpawnStaticMoon` only spawns the R1
 
 R1 runs on the game thread inside `OnConstruction` / `BeginPlay` and builds six mesh sections once.
 
-In R2, `UPlanetTerrainNextComponent` ticks in `TG_PostUpdateWork` on the game thread, after the camera has moved. Each tick it updates the tree, then builds pending patches in priority order until `BuildBudgetMs` is spent (always at least one), then applies the draw set. There are no workers and no readbacks. `CreateMeshSection` is called once per pooled slot; refills use `UpdateMeshSection` with the same topology.
+In R2, `UPlanetTerrainNextComponent` ticks in `TG_PostUpdateWork` on the game thread, after the camera has moved. Each tick it updates the tree, then builds pending patches in priority order until `BuildBudgetMs` is spent (always at least one), then applies the draw set. There are no workers and no readbacks.
+
+**R10.1 mesh sections:** `UpdateMeshSection` never rewrites indices. On `ReleaseNode` the section is cleared (`ClearMeshSection`); the next residency calls `CreateMeshSection` with the current shared `Indices()`. Per-frame CPU morph may still `Update` vertices in place. `ForceFreshMeshSection` (default on) also Clear+Creates on BuildNode upload.
 
 Later rules, not implemented:
 

@@ -46,6 +46,12 @@ void APlanetTerrainNextMoon::BeginPlay()
 	if (!bStaticShellOnly && Terrain)
 	{
 		Terrain->SetSuspendedProxy(Shell);
+		// R10.1: while Next owns the draw, shell must not occlude patch pixels.
+		if (Shell)
+		{
+			Shell->SetVisibility(false);
+			Shell->bUseAsOccluder = false;
+		}
 		Terrain->InitializeTerrain(Descriptor);
 	}
 }

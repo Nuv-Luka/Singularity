@@ -80,6 +80,11 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	int32 DetailMaxConcurrentBakes = 2;
 	/** GPU detail texture uploads per frame. */
 	int32 DetailUploadsPerFrame = 1;
+	/**
+	 * R10.1: recreate PMC sections on every upload (Clear+Create) instead of UpdateMeshSection.
+	 * Default true — UpdateMeshSection never rewrites indices; pooled slots must not keep a stale index buffer.
+	 */
+	bool bForceFreshMeshSection = true;
 
 	static FPlanetTerrainNextRuntimeSettings Read();
 };

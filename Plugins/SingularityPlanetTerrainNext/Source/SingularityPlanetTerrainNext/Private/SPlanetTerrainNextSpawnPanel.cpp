@@ -275,6 +275,26 @@ void SPlanetTerrainNextSpawnPanel::Construct(const FArguments& InArgs)
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
 						[
+							MakeCVarCheckRow(TEXT("R10 Diag (frozen)"), TEXT("singularity.TerrainNext.Diag.Enable"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarIntRow(TEXT("Diag mode 0/1"), TEXT("singularity.TerrainNext.Diag.Mode"), 0, 1)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarIntRow(TEXT("Diag level"), TEXT("singularity.TerrainNext.Diag.Level"), 0, 12)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarCheckRow(TEXT("Diag height"), TEXT("singularity.TerrainNext.Diag.Height"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							MakeCVarCheckRow(TEXT("Force fresh PMC"), TEXT("singularity.TerrainNext.ForceFreshMeshSection"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
 							MakeCVarCheckRow(TEXT("Pause builds"), TEXT("singularity.TerrainNext.PauseBuilds"))
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)

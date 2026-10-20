@@ -48,8 +48,10 @@ inline constexpr int32 GridVertexCount = Row * Row;
 inline constexpr int32 SkirtVertexCount = 4 * Row;
 inline constexpr int32 VertexCount = GridVertexCount + SkirtVertexCount;
 
-/** Shared index buffer: grid triangles, then two-sided skirt quads. */
+	/** Shared index buffer: grid triangles, then two-sided skirt quads. */
 SINGULARITYPLANETTERRAINNEXT_API const TArray<int32>& Indices();
+/** Bump when MakeIndices() topology/winding changes — slots must recreate PMC sections. */
+SINGULARITYPLANETTERRAINNEXT_API int32 GetIndexBufferVersion();
 
 SINGULARITYPLANETTERRAINNEXT_API double VertexSpacingMeters(double RadiusM, int32 Level);
 SINGULARITYPLANETTERRAINNEXT_API double MinWavelengthMeters(double RadiusM, int32 Level);
@@ -70,6 +72,16 @@ SINGULARITYPLANETTERRAINNEXT_API float MorphFromPixelError(double PixelError, do
 
 SINGULARITYPLANETTERRAINNEXT_API void Build(
 	const FPlanetTerrainNextHeightField& HeightField,
+	const FPlanetTerrainNextNodeId& Id,
+	double SkirtDepthM,
+	FPlanetTerrainNextPatchData& Out);
+
+/**
+ * R10.1 diagnostic: perfect cube-sphere (Height=0). No HeightField sampling.
+ * Coarse == Fine. Skirts use SkirtDepthM along radial.
+ */
+SINGULARITYPLANETTERRAINNEXT_API void BuildFlat(
+	double RadiusM,
 	const FPlanetTerrainNextNodeId& Id,
 	double SkirtDepthM,
 	FPlanetTerrainNextPatchData& Out);

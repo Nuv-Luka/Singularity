@@ -183,6 +183,11 @@ TAutoConsoleVariable<int32> CVarDetailUploadsPerFrame(
 	TEXT("singularity.TerrainNext.DetailUploadsPerFrame"),
 	1,
 	TEXT("R9.3: max detail texture GPU uploads per frame (0–6)."));
+
+TAutoConsoleVariable<bool> CVarForceFreshMeshSection(
+	TEXT("singularity.TerrainNext.ForceFreshMeshSection"),
+	true,
+	TEXT("R10.1: Clear+Create PMC sections on upload (UpdateMeshSection never rewrites indices)."));
 } // namespace
 
 FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
@@ -225,6 +230,7 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.DetailResolution = FMath::Clamp(CVarDetailResolution.GetValueOnGameThread(), 64, 1024);
 	Out.DetailMaxConcurrentBakes = FMath::Clamp(CVarDetailMaxConcurrentBakes.GetValueOnGameThread(), 1, 6);
 	Out.DetailUploadsPerFrame = FMath::Clamp(CVarDetailUploadsPerFrame.GetValueOnGameThread(), 0, 6);
+	Out.bForceFreshMeshSection = CVarForceFreshMeshSection.GetValueOnGameThread();
 	return Out;
 }
 
