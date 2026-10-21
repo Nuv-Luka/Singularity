@@ -247,6 +247,7 @@ private:
 	void RefreshDetailParams();
 	void RefreshDebugColors();
 	bool GetView(FPlanetTerrainNextView& OutView) const;
+	void BuildPredictivePreload(const FPlanetTerrainNextView& View, const FPlanetTerrainNextView& PredictedView, const TArray<FPlanetTerrainNextNodeId>& DrawSet, TArray<FPlanetTerrainNextPendingBuild>& OutCandidates);
 	void RecordBuildTime(double Milliseconds);
 	void WritePerfSample();
 	void PrintStats() const;
@@ -266,6 +267,10 @@ private:
 	TArray<double> GeometricErrorByLevel;
 	FPlanetTerrainNextRuntimeSettings Settings;
 	int64 FrameCounter = 0;
+	FVector3d PreviousCameraM = FVector3d::ZeroVector;
+	FVector3d PreviousForward = FVector3d(0.0, 0.0, -1.0);
+	double PreviousViewTime = 0.0;
+	bool bHasCameraPrediction = false;
 
 	/** Pooled patch components; owned through the actor, kept alive by this array. */
 	UPROPERTY(Transient)
@@ -293,6 +298,8 @@ private:
 	TSet<FPlanetTerrainNextNodeId> PendingPhysicalReleases;
 	/** Parents held N frames so children replace them without co-drawing / hard pops. */
 	TMap<FPlanetTerrainNextNodeId, int32> HandoffHoldFrames;
+	/** Short grace window for optional requests after a camera turn. */
+	TMap<FPlanetTerrainNextNodeId, int64> PredictivePreloadGrace;
 	/** R10.2: active dither fade groups (sibling Progress shared). */
 	TArray<FPlanetTerrainNextLodFade> LodFades;
 	TMap<FPlanetTerrainNextNodeId, int32> CollisionResident;

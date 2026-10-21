@@ -1679,6 +1679,95 @@ bool UPlanetTerrainNextComponent::GetView(FPlanetTerrainNextView& OutView) const
 	return true;
 }
 
+void UPlanetTerrainNextComponent::BuildPredictivePreload(
+	const FPlanetTerrainNextView& View,
+	const FPlanetTerrainNextView& PredictedView,
+	const TArray<FPlanetTerrainNextNodeId>& DrawSet,
+	TArray<FPlanetTerrainNextPendingBuild>& OutCandidates)
+{
+	OutCandidates.Reset();
+	if (Settings.PreloadRequestsPerFrame <= 0 || Settings.PreloadHorizonSeconds <= 0.0)
+	{
+		return;
+	}
+
+	TSet<FPlanetTerrainNextNodeId> Seen;
+	Seen.Reserve(DrawSet.Num() * 4);
+	const FVector3d PredictedForward = PredictedView.Forward.GetSafeNormal();
+	for (const FPlanetTerrainNextNodeId& Parent : DrawSet)
+	{
+		if (Parent.Level >= Settings.Lod.MaxLevel)
+		{
+			continue;
+		}
+		for (int32 ChildIndex = 0; ChildIndex < 4; ++ChildIndex)
+		{
+			const FPlanetTerrainNextNodeId Child = Parent.Child(ChildIndex);
+			const double LevelAlpha = Settings.Lod.MaxLevel > 0
+				? FMath::Clamp(static_cast<double>(Child.Level) / static_cast<double>(Settings.Lod.MaxLevel), 0.0, 1.0)
+				: 1.0;
+			const double GuardDegrees = FMath::Lerp(Settings.PreloadGuardDegrees, Settings.PreloadGuardMaxDegrees, LevelAlpha);
+			const double GuardHalfFovRad = PredictedView.HalfDiagonalFovRad + FMath::DegreesToRadians(GuardDegrees);
+			if (Seen.Contains(Child)
+				|| Resident.Contains(Child)
+				|| !Quadtree.IsNodeInPreloadFrustum(Child, PredictedView, GuardHalfFovRad))
+			{
+				continue;
+			}
+			const FPlanetTerrainNextTileId TileId = MakeTileId(Child);
+			if (TileCache.IsValid() && TileCache->Find(TileId))
+			{
+				continue;
+			}
+
+			const double U = 0.5 * (Child.U0() + Child.U1());
+			const double V = 0.5 * (Child.V0() + Child.V1());
+			const FVector3d CenterM = PlanetTerrainNext::FacePoint(Child.Face, U, V) * Descriptor.RadiusMeters;
+			const FVector3d ToCenter = (CenterM - PredictedView.CameraM).GetSafeNormal();
+			const double FutureAngle = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(PredictedForward, ToCenter), -1.0, 1.0));
+			const double CurrentAngle = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(View.Forward.GetSafeNormal(), ToCenter), -1.0, 1.0));
+
+			FPlanetTerrainNextPendingBuild Candidate;
+			Candidate.Id = Child;
+			// Center-screen and imminent-path children sort first while remaining
+			// entirely outside the logical draw/split state.
+			Candidate.Priority = 1.0e6 - FutureAngle * 1.0e5 - CurrentAngle * 1.0e4 - static_cast<double>(Child.Level);
+			OutCandidates.Add(Candidate);
+			Seen.Add(Child);
+			PredictivePreloadGrace.FindOrAdd(Child) = FrameCounter + 30;
+		}
+	}
+
+	// Keep a small amount of optional work alive after a turn so a brief change
+	// in heading does not throw away useful tiles that are already baking.
+	for (auto It = PredictivePreloadGrace.CreateIterator(); It; ++It)
+	{
+		if (It.Value() < FrameCounter)
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+		const FPlanetTerrainNextNodeId& Id = It.Key();
+		if (Seen.Contains(Id) || Resident.Contains(Id) || (TileCache.IsValid() && TileCache->Find(MakeTileId(Id))))
+		{
+			continue;
+		}
+		FPlanetTerrainNextPendingBuild GraceCandidate;
+		GraceCandidate.Id = Id;
+		GraceCandidate.Priority = -1000.0 - static_cast<double>(It.Value() - FrameCounter);
+		OutCandidates.Add(GraceCandidate);
+	}
+	while (PredictivePreloadGrace.Num() > 512)
+	{
+		auto It = PredictivePreloadGrace.CreateIterator();
+		if (!It)
+		{
+			break;
+		}
+		It.RemoveCurrent();
+	}
+}
+
 void UPlanetTerrainNextComponent::RecordBuildTime(double Milliseconds)
 {
 	FrameStats.LastBuildMs = Milliseconds;
@@ -2085,8 +2174,55 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 	if (!bHasView)
 	{
+		bHasCameraPrediction = false;
 		return;
 	}
+
+	// Predict a short future view in planet-relative double precision. A large
+	// discontinuity is treated as a teleport; ordinary velocity is clamped so a
+	// transient camera spike cannot flood the speculative queue.
+	FPlanetTerrainNextView PredictedView = View;
+	if (!bHasCameraPrediction)
+	{
+		PreviousCameraM = View.CameraM;
+		PreviousForward = View.Forward;
+		PreviousViewTime = View.TimeSeconds;
+		bHasCameraPrediction = true;
+	}
+	else
+	{
+		const double Dt = FMath::Clamp(View.TimeSeconds - PreviousViewTime, 1.0 / 240.0, 0.25);
+		const FVector3d Delta = View.CameraM - PreviousCameraM;
+		const double Distance = Delta.Length();
+		const double TeleportDistance = FMath::Max(100000.0, Settings.PreloadMaxSpeedMps * Dt * 16.0);
+		if (Distance > TeleportDistance)
+		{
+			PreviousCameraM = View.CameraM;
+			PreviousForward = View.Forward;
+			PreviousViewTime = View.TimeSeconds;
+		}
+		else
+		{
+			FVector3d Velocity = Delta / Dt;
+			const double Speed = Velocity.Length();
+			if (Speed > Settings.PreloadMaxSpeedMps)
+			{
+				Velocity = Velocity.GetSafeNormal() * Settings.PreloadMaxSpeedMps;
+			}
+			FVector3d ForwardRate = (View.Forward - PreviousForward) / Dt;
+			const double AngularRate = ForwardRate.Length();
+			if (AngularRate > 3.0)
+			{
+				ForwardRate = ForwardRate.GetSafeNormal() * 3.0;
+			}
+			PredictedView.CameraM = View.CameraM + Velocity * Settings.PreloadHorizonSeconds;
+			PredictedView.Forward = (View.Forward + ForwardRate * Settings.PreloadHorizonSeconds).GetSafeNormal();
+			PreviousCameraM = View.CameraM;
+			PreviousForward = View.Forward;
+			PreviousViewTime = View.TimeSeconds;
+		}
+	}
+	PredictedView.HalfDiagonalFovRad = View.HalfDiagonalFovRad;
 	// Refresh collision demand before scheduling so missing collision tiles enter
 	// the same bounded worker queue as visual refinement. The second call below
 	// cooks any tiles that complete during this frame.
@@ -2119,6 +2255,19 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		FrameCounter,
 		Settings.PrefetchPerFrame,
 		Desired);
+	if (Settings.PreloadRequestsPerFrame > 0)
+	{
+		TArray<FPlanetTerrainNextNodeId> CurrentDraw;
+		Quadtree.CollectDrawSet(IsReady, CurrentDraw);
+		TArray<FPlanetTerrainNextPendingBuild> PredictiveCandidates;
+		BuildPredictivePreload(View, PredictedView, CurrentDraw, PredictiveCandidates);
+		Planner.AppendPredictivePrefetch(
+			PredictiveCandidates,
+			[this](const FPlanetTerrainNextNodeId& NodeId) { return MakeTileId(NodeId); },
+			FrameCounter,
+			Settings.PreloadRequestsPerFrame,
+			Desired);
+	}
 	for (const FPlanetTerrainNextNodeId& CollisionId : CollisionManager.GetDesired())
 	{
 		if (CollisionResident.Contains(CollisionId))

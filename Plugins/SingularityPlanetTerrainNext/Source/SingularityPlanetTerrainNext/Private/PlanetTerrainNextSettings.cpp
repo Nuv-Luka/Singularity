@@ -139,6 +139,31 @@ TAutoConsoleVariable<int32> CVarPrefetchPerFrame(
 	8,
 	TEXT("Bounded speculative sibling tile requests per planner pass. 0 disables."));
 
+TAutoConsoleVariable<int32> CVarPreloadRequestsPerFrame(
+	TEXT("singularity.TerrainNext.PreloadRequestsPerFrame"),
+	8,
+	TEXT("Bounded camera-predicted child tile requests per frame. 0 disables."));
+
+TAutoConsoleVariable<float> CVarPreloadGuardDegrees(
+	TEXT("singularity.TerrainNext.PreloadGuardDegrees"),
+	12.0f,
+	TEXT("Extra cone angle beyond the real camera frustum used only for speculative preloading."));
+
+TAutoConsoleVariable<float> CVarPreloadGuardMaxDegrees(
+	TEXT("singularity.TerrainNext.PreloadGuardMaxDegrees"),
+	60.0f,
+	TEXT("Extra preload cone angle at the deepest LOD; levels interpolate from PreloadGuardDegrees."));
+
+TAutoConsoleVariable<float> CVarPreloadHorizonSeconds(
+	TEXT("singularity.TerrainNext.PreloadHorizonSeconds"),
+	0.75f,
+	TEXT("Short horizon in seconds for camera-driven speculative preloading."));
+
+TAutoConsoleVariable<float> CVarPreloadMaxSpeedMps(
+	TEXT("singularity.TerrainNext.PreloadMaxSpeedMps"),
+	100000.0f,
+	TEXT("Maximum camera speed accepted by prediction; teleports reset prediction."));
+
 TAutoConsoleVariable<float> CVarCollisionRadius(
 	TEXT("singularity.TerrainNext.CollisionRadiusM"),
 	200.0f,
@@ -265,6 +290,11 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 	Out.MaxBakeWorkers = FMath::Clamp(CVarMaxBakeWorkers.GetValueOnGameThread(), 1, 16);
 	Out.MaxBakeQueue = FMath::Clamp(CVarMaxBakeQueue.GetValueOnGameThread(), 8, 4096);
 	Out.PrefetchPerFrame = FMath::Clamp(CVarPrefetchPerFrame.GetValueOnGameThread(), 0, 64);
+	Out.PreloadRequestsPerFrame = FMath::Clamp(CVarPreloadRequestsPerFrame.GetValueOnGameThread(), 0, 64);
+	Out.PreloadGuardDegrees = FMath::Clamp(static_cast<double>(CVarPreloadGuardDegrees.GetValueOnGameThread()), 0.0, 45.0);
+	Out.PreloadGuardMaxDegrees = FMath::Clamp(static_cast<double>(CVarPreloadGuardMaxDegrees.GetValueOnGameThread()), Out.PreloadGuardDegrees, 90.0);
+	Out.PreloadHorizonSeconds = FMath::Clamp(static_cast<double>(CVarPreloadHorizonSeconds.GetValueOnGameThread()), 0.0, 3.0);
+	Out.PreloadMaxSpeedMps = FMath::Clamp(static_cast<double>(CVarPreloadMaxSpeedMps.GetValueOnGameThread()), 100.0, 10000000.0);
 	Out.CollisionRadiusM = FMath::Clamp(static_cast<double>(CVarCollisionRadius.GetValueOnGameThread()), 10.0, 5000.0);
 	Out.CollisionMaxAltitudeM = FMath::Clamp(static_cast<double>(CVarCollisionMaxAltitude.GetValueOnGameThread()), 100.0, 1000000.0);
 	Out.CollisionSpacingM = FMath::Clamp(static_cast<double>(CVarCollisionSpacing.GetValueOnGameThread()), 0.5, 50.0);

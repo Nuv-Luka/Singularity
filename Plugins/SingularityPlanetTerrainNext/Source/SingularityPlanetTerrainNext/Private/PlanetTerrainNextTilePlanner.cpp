@@ -116,3 +116,61 @@ void FPlanetTerrainNextTilePlanner::Plan(
 	});
 	Stats.Emitted = OutRequests.Num();
 }
+
+void FPlanetTerrainNextTilePlanner::AppendPredictivePrefetch(
+	const TArray<FPlanetTerrainNextPendingBuild>& Candidates,
+	TFunctionRef<FPlanetTerrainNextTileId(const FPlanetTerrainNextNodeId&)> MakeTileId,
+	int64 Frame,
+	int32 MaxRequests,
+	TArray<FPlanetTerrainNextTileRequest>& InOutRequests)
+{
+	const int32 Limit = FMath::Max(0, MaxRequests);
+	if (Limit == 0)
+	{
+		return;
+	}
+
+	TSet<FPlanetTerrainNextTileId> Seen;
+	Seen.Reserve(InOutRequests.Num() + Limit);
+	for (const FPlanetTerrainNextTileRequest& Existing : InOutRequests)
+	{
+		Seen.Add(Existing.TileId);
+	}
+
+	TArray<FPlanetTerrainNextPendingBuild> Sorted = Candidates;
+	Sorted.Sort([](const FPlanetTerrainNextPendingBuild& A, const FPlanetTerrainNextPendingBuild& B)
+	{
+		return A.Priority > B.Priority;
+	});
+
+	int32 Added = 0;
+	for (const FPlanetTerrainNextPendingBuild& Candidate : Sorted)
+	{
+		if (Added >= Limit || Candidate.Id.Level == 0)
+		{
+			break;
+		}
+		const FPlanetTerrainNextTileId TileId = MakeTileId(Candidate.Id);
+		if (Seen.Contains(TileId))
+		{
+			continue;
+		}
+		Seen.Add(TileId);
+
+		FPlanetTerrainNextTileRequest Request;
+		Request.NodeId = Candidate.Id;
+		Request.TileId = TileId;
+		Request.Class = EPlanetTerrainNextRequestClass::Prefetch;
+		Request.bRequiredForCoverage = false;
+		Request.Priority = 1.0e10 + Candidate.Priority;
+		Request.DeadlineFrame = Frame + 45;
+		InOutRequests.Add(Request);
+		++Stats.Prefetch;
+		++Added;
+	}
+	InOutRequests.Sort([](const FPlanetTerrainNextTileRequest& A, const FPlanetTerrainNextTileRequest& B)
+	{
+		return A.Priority > B.Priority;
+	});
+	Stats.Emitted = InOutRequests.Num();
+}

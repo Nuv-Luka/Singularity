@@ -131,7 +131,12 @@ void FPlanetTerrainNextQuadtree::SetNodeHeightRange(const FPlanetTerrainNextNode
 	}
 }
 
-bool FPlanetTerrainNextQuadtree::IsVisible(const FNode& Node, const FPlanetTerrainNextView& View, const FPlanetTerrainNextLodSettings& Settings) const
+bool FPlanetTerrainNextQuadtree::IsWithinViewCone(
+	const FNode& Node,
+	const FPlanetTerrainNextView& View,
+	double HalfDiagonalFovRad,
+	bool bApplySafetyRadius,
+	double SafetyRadiusMinM) const
 {
 	const FVector3d ToCenter = Node.BoundCenterM - View.CameraM;
 	const double Distance = ToCenter.Length();
@@ -145,7 +150,7 @@ bool FPlanetTerrainNextQuadtree::IsVisible(const FNode& Node, const FPlanetTerra
 	const double AngleGap = FMath::Max(0.0, QuadtreeAngleBetweenUnit(CameraDir, Node.CenterDir) - Node.AngularRadius);
 
 	const double Altitude = FMath::Max(0.0, CameraRadius - RadiusM);
-	if (AngleGap * RadiusM <= FMath::Max(Settings.SafetyRadiusMinM, Altitude))
+	if (bApplySafetyRadius && AngleGap * RadiusM <= FMath::Max(SafetyRadiusMinM, Altitude))
 	{
 		return true;
 	}
@@ -167,7 +172,15 @@ bool FPlanetTerrainNextQuadtree::IsVisible(const FNode& Node, const FPlanetTerra
 
 	const double HalfAngle = FMath::Asin(FMath::Clamp(Node.BoundRadiusM / Distance, 0.0, 1.0));
 	const double ToCenterAngle = QuadtreeAngleBetweenUnit(View.Forward.GetSafeNormal(), ToCenter / Distance);
-	return ToCenterAngle - HalfAngle <= View.HalfDiagonalFovRad;
+	return ToCenterAngle - HalfAngle <= HalfDiagonalFovRad;
+}
+
+bool FPlanetTerrainNextQuadtree::IsVisible(
+	const FNode& Node,
+	const FPlanetTerrainNextView& View,
+	const FPlanetTerrainNextLodSettings& Settings) const
+{
+	return IsWithinViewCone(Node, View, View.HalfDiagonalFovRad, true, Settings.SafetyRadiusMinM);
 }
 
 double FPlanetTerrainNextQuadtree::PixelError(const FNode& Node, const FPlanetTerrainNextView& View) const
@@ -492,4 +505,26 @@ void FPlanetTerrainNextQuadtree::CollectAll(TArray<FPlanetTerrainNextNodeId>& Ou
 			}
 		}
 	}
+}
+
+bool FPlanetTerrainNextQuadtree::IsNodeInPreloadFrustum(
+	const FPlanetTerrainNextNodeId& Id,
+	const FPlanetTerrainNextView& View,
+	double GuardHalfDiagonalFovRad) const
+{
+	if (Id.Face >= 6 || Id.Level > 24)
+	{
+		return false;
+	}
+	FNode Candidate;
+	MakeNode(Candidate, Id, GlobalMinH, GlobalMaxH);
+	// Preloading is a directional guard query only. It deliberately omits the
+	// safety-radius override used by actual visibility so offscreen terrain does
+	// not become high-priority visual refinement.
+	return IsWithinViewCone(
+		Candidate,
+		View,
+		FMath::Max(View.HalfDiagonalFovRad, GuardHalfDiagonalFovRad),
+		false,
+		0.0);
 }

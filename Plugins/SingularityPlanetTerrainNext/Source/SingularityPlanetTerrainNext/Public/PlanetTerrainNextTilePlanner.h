@@ -57,6 +57,14 @@ public:
 		int32 MaxPrefetch,
 		TArray<FPlanetTerrainNextTileRequest>& OutRequests);
 
+	/** Adds bounded camera-predicted requests without adding nodes to the logical quadtree. */
+	void AppendPredictivePrefetch(
+		const TArray<FPlanetTerrainNextPendingBuild>& Candidates,
+		TFunctionRef<FPlanetTerrainNextTileId(const FPlanetTerrainNextNodeId&)> MakeTileId,
+		int64 Frame,
+		int32 MaxRequests,
+		TArray<FPlanetTerrainNextTileRequest>& InOutRequests);
+
 	const FPlanetTerrainNextPlannerStats& GetStats() const { return Stats; }
 
 private:

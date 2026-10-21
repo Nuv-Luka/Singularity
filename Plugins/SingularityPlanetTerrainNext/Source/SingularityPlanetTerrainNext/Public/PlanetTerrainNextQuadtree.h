@@ -146,6 +146,8 @@ public:
 	void CollectDrawSet(FReadyFn IsReady, TArray<FPlanetTerrainNextDrawItem>& OutDraw) const;
 	void CollectPending(FReadyFn IsReady, TArray<FPlanetTerrainNextPendingBuild>& OutPending) const;
 	void CollectAll(TArray<FPlanetTerrainNextNodeId>& OutNodes) const;
+	/** Directional guard-frustum query for speculative preloading. Does not change visibility or split state. */
+	bool IsNodeInPreloadFrustum(const FPlanetTerrainNextNodeId& Id, const FPlanetTerrainNextView& View, double GuardHalfDiagonalFovRad) const;
 	/** Last evaluated projected error for a resident node; 0 if unknown. */
 	double GetNodePixelError(const FPlanetTerrainNextNodeId& Id) const;
 
@@ -158,6 +160,7 @@ private:
 	void MakeNode(FNode& Node, const FPlanetTerrainNextNodeId& Id, double MinH, double MaxH) const;
 	void RecomputeBounds(FNode& Node) const;
 	FNode* FindNode(const FPlanetTerrainNextNodeId& Id) const;
+	bool IsWithinViewCone(const FNode& Node, const FPlanetTerrainNextView& View, double HalfDiagonalFovRad, bool bApplySafetyRadius, double SafetyRadiusMinM) const;
 	bool IsVisible(const FNode& Node, const FPlanetTerrainNextView& View, const FPlanetTerrainNextLodSettings& Settings) const;
 	double PixelError(const FNode& Node, const FPlanetTerrainNextView& View) const;
 	double WeightedPixelError(const FNode& Node, const FPlanetTerrainNextView& View, const FPlanetTerrainNextLodSettings& Settings) const;

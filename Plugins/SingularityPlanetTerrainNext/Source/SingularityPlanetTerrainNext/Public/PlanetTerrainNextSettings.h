@@ -60,6 +60,16 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextRuntimeSettings
 	int32 MaxBakeQueue = 256;
 	/** Speculative sibling warmup requests emitted per plan. */
 	int32 PrefetchPerFrame = 8;
+	/** Additional predictive requests for children just outside the real frustum. */
+	int32 PreloadRequestsPerFrame = 8;
+	/** Guard angle added to the real camera cone for speculative preloading. */
+	double PreloadGuardDegrees = 12.0;
+	/** Guard angle at the deepest configured LOD; intermediate levels interpolate linearly. */
+	double PreloadGuardMaxDegrees = 60.0;
+	/** Short prediction horizon for camera-driven preloading. */
+	double PreloadHorizonSeconds = 0.75;
+	/** Maximum accepted camera speed for prediction; larger deltas reset prediction. */
+	double PreloadMaxSpeedMps = 100000.0;
 	/** Local collision geodesic radius (metres). */
 	double CollisionRadiusM = 200.0;
 	/** Do not maintain local collision above this altitude; visual streaming remains independent. */
