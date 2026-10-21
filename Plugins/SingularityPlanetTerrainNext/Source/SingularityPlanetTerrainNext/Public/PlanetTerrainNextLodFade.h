@@ -26,6 +26,14 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextLodFade
 
 namespace PlanetTerrainNextLodFade
 {
+/** Deterministic reference for the material's shared-noise complementary mask. */
+inline bool EvaluateComplementaryDither(float Progress, float Noise01, bool bChild)
+{
+	const float ParentThreshold = 1.0f - FMath::Clamp(Progress, 0.0f, 1.0f);
+	const bool bParentAccepted = Noise01 < ParentThreshold;
+	return bChild ? !bParentAccepted : bParentAccepted;
+}
+
 /** True if Desired contains all four children of Parent. */
 SINGULARITYPLANETTERRAINNEXT_API bool DesiredHasAllChildren(
 	const TSet<FPlanetTerrainNextNodeId>& Desired,

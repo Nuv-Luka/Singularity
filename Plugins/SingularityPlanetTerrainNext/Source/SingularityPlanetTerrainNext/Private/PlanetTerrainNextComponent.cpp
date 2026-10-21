@@ -212,6 +212,7 @@ void UPlanetTerrainNextComponent::ShutdownTerrain()
 	}
 	Resident.Reset();
 	Drawn.Reset();
+	PendingPhysicalReleases.Reset();
 	HandoffHoldFrames.Reset();
 	LodFades.Reset();
 	if (GpuPool.IsValid())
@@ -917,6 +918,8 @@ void UPlanetTerrainNextComponent::ApplyDrawSetDithered(
 {
 	HandoffHoldFrames.Reset();
 	auto IsRes = [this](const FPlanetTerrainNextNodeId& Id) { return Resident.Contains(Id); };
+	TSet<FPlanetTerrainNextNodeId> EffectiveDesired = Desired;
+	TSet<FPlanetTerrainNextNodeId> CapacityDeferredRender;
 
 	// Reverse mid-fade if Desired flipped direction.
 	for (FPlanetTerrainNextLodFade& Fade : LodFades)
@@ -956,6 +959,12 @@ void UPlanetTerrainNextComponent::ApplyDrawSetDithered(
 		}
 		if (LodFades.Num() >= Settings.MaxConcurrentTransitionGroups)
 		{
+			// Keep the old parent visible until a transition slot becomes available.
+			EffectiveDesired.Add(Prev);
+			for (int32 Child = 0; Child < 4; ++Child)
+			{
+				EffectiveDesired.Remove(Prev.Child(Child));
+			}
 			continue;
 		}
 		FPlanetTerrainNextLodFade Fade;
@@ -1005,6 +1014,12 @@ void UPlanetTerrainNextComponent::ApplyDrawSetDithered(
 		}
 		if (LodFades.Num() >= Settings.MaxConcurrentTransitionGroups)
 		{
+			// Keep all old children visible until this merge can get a shared fade.
+			EffectiveDesired.Remove(Parent);
+			for (int32 Child = 0; Child < 4; ++Child)
+			{
+				CapacityDeferredRender.Add(Parent.Child(Child));
+			}
 			continue;
 		}
 		FPlanetTerrainNextLodFade Fade;
@@ -1057,7 +1072,11 @@ void UPlanetTerrainNextComponent::ApplyDrawSetDithered(
 	}
 
 	TSet<FPlanetTerrainNextNodeId> Render;
-	PlanetTerrainNextLodFade::BuildRenderSet(Desired, LodFades, Render);
+	PlanetTerrainNextLodFade::BuildRenderSet(EffectiveDesired, LodFades, Render);
+	for (const FPlanetTerrainNextNodeId& Id : CapacityDeferredRender)
+	{
+		Render.Add(Id);
+	}
 	// Keep fading parents/children resident-visible even if Desired dropped them early.
 	SyncVisibilityToRenderSet(Render);
 	ApplyLodFadeParams();
@@ -1071,6 +1090,54 @@ void UPlanetTerrainNextComponent::ApplyDrawSetDithered(
 	FrameStats.ActiveLodFades = LodFades.Num();
 	FrameStats.MeanLodFade = LodFades.Num() > 0 ? FadeSum / LodFades.Num() : 0.0f;
 	FrameStats.HandoffParentsKept = LodFades.Num();
+}
+
+void UPlanetTerrainNextComponent::FlushPendingPhysicalReleases()
+{
+	if (PendingPhysicalReleases.Num() == 0)
+	{
+		return;
+	}
+
+	TArray<FPlanetTerrainNextNodeId> ToRelease;
+	for (const FPlanetTerrainNextNodeId& Id : PendingPhysicalReleases)
+	{
+		if (Drawn.Contains(Id))
+		{
+			continue;
+		}
+		bool bFadeParticipant = false;
+		for (const FPlanetTerrainNextLodFade& Fade : LodFades)
+		{
+			if (Fade.Parent == Id)
+			{
+				bFadeParticipant = true;
+				break;
+			}
+			for (int32 Child = 0; Child < 4; ++Child)
+			{
+				if (Fade.Parent.Child(Child) == Id)
+				{
+					bFadeParticipant = true;
+					break;
+				}
+			}
+			if (bFadeParticipant)
+			{
+				break;
+			}
+		}
+		if (!bFadeParticipant)
+		{
+			ToRelease.Add(Id);
+		}
+	}
+
+	for (const FPlanetTerrainNextNodeId& Id : ToRelease)
+	{
+		PendingPhysicalReleases.Remove(Id);
+		ReleaseNode(Id);
+	}
 }
 
 void UPlanetTerrainNextComponent::SyncVisibilityToRenderSet(const TSet<FPlanetTerrainNextNodeId>& Render)
@@ -1446,6 +1513,7 @@ void UPlanetTerrainNextComponent::HideAll()
 		ReconcileShadowState(Slot, false, false);
 	}
 	Drawn.Reset();
+	PendingPhysicalReleases.Reset();
 	HandoffHoldFrames.Reset();
 	LodFades.Reset();
 	for (const TPair<FPlanetTerrainNextNodeId, int32>& Pair : CollisionResident)
@@ -2005,7 +2073,9 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	Quadtree.Update(View, Settings.Lod, IsReady, Released);
 	for (const FPlanetTerrainNextNodeId& Id : Released)
 	{
-		ReleaseNode(Id);
+		// Quadtree retirement is logical. Keep the pooled mesh resident until
+		// ApplyDrawSetDithered has had a chance to start/finish a merge fade.
+		PendingPhysicalReleases.Add(Id);
 	}
 	TArray<FPlanetTerrainNextPendingBuild> Pending;
 	Quadtree.CollectPending(IsReady, Pending);
@@ -2081,6 +2151,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	Quadtree.CollectDrawSet(IsReady, DrawSet);
 	FrameStats.bDrawCoverageOk = CheckDrawCoverage(DrawSet);
 	ApplyDrawSet(DrawSet, DeltaTime);
+	FlushPendingPhysicalReleases();
 	const double CollStart = FPlatformTime::Seconds();
 	UpdateCollision(View);
 	FrameStats.CollisionMs = (FPlatformTime::Seconds() - CollStart) * 1000.0;

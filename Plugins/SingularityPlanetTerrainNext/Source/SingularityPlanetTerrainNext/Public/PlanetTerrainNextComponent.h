@@ -228,6 +228,7 @@ private:
 	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds);
 	void ApplyDrawSetExclusive(TSet<FPlanetTerrainNextNodeId>& Next);
 	void ApplyDrawSetDithered(const TSet<FPlanetTerrainNextNodeId>& Desired, float DeltaSeconds);
+	void FlushPendingPhysicalReleases();
 	void SyncVisibilityToRenderSet(const TSet<FPlanetTerrainNextNodeId>& Render);
 	void ReconcileShadowState(FSlot& Slot, bool bInFade, bool bDominant);
 	void ApplyLodFadeParams();
@@ -288,6 +289,8 @@ private:
 	TArray<int32> FreeSlots;
 	TMap<FPlanetTerrainNextNodeId, int32> Resident;
 	TSet<FPlanetTerrainNextNodeId> Drawn;
+	/** Quadtree-retired nodes kept alive until a merge fade no longer needs them. */
+	TSet<FPlanetTerrainNextNodeId> PendingPhysicalReleases;
 	/** Parents held N frames so children replace them without co-drawing / hard pops. */
 	TMap<FPlanetTerrainNextNodeId, int32> HandoffHoldFrames;
 	/** R10.2: active dither fade groups (sibling Progress shared). */

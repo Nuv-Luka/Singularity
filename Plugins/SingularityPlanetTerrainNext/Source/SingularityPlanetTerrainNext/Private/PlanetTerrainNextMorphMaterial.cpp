@@ -187,9 +187,10 @@ UMaterialInterface* CreateAndSave(const TCHAR* InPackagePath, const TCHAR* InAss
 	NormalLerp->B.Connect(0, DetailNormal);
 	NormalLerp->Alpha.Connect(0, DetailBlend);
 
-	// --- R10.2 complementary dither ---
-	// EffectiveAlpha = lerp(1 - LodFade, LodFade, LodFadeRole)
-	// OpacityMask = DitherTemporalAA(EffectiveAlpha)
+	// --- R11 genuinely complementary dither ---
+	// Build one parent mask from the shared progress/noise sample, then use its
+	// exact one-minus result for children. Interpolating opacity fractions before
+	// dithering can leave both patches accepted or both rejected at a pixel.
 	auto* LodFade = Cast<UMaterialExpressionScalarParameter>(
 		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionScalarParameter::StaticClass(), -700, 720));
 	LodFade->ParameterName = TEXT("LodFade");
@@ -204,13 +205,8 @@ UMaterialInterface* CreateAndSave(const TCHAR* InPackagePath, const TCHAR* InAss
 		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionOneMinus::StaticClass(), -480, 720));
 	OneMinusFade->Input.Connect(0, LodFade);
 
-	auto* EffectiveAlpha = Cast<UMaterialExpressionLinearInterpolate>(
-		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionLinearInterpolate::StaticClass(), -280, 760));
-	EffectiveAlpha->A.Connect(0, OneMinusFade);
-	EffectiveAlpha->B.Connect(0, LodFade);
-	EffectiveAlpha->Alpha.Connect(0, LodFadeRole);
-
-	UMaterialExpression* OpacitySource = EffectiveAlpha;
+	UMaterialExpression* ParentMaskInput = OneMinusFade;
+	UMaterialExpression* ParentMask = ParentMaskInput;
 	if (UMaterialFunction* DitherFn = LoadObject<UMaterialFunction>(
 			nullptr, TEXT("/Engine/Functions/Engine_MaterialFunctions02/Utility/DitherTemporalAA.DitherTemporalAA")))
 	{
@@ -221,15 +217,24 @@ UMaterialInterface* CreateAndSave(const TCHAR* InPackagePath, const TCHAR* InAss
 			DitherCall->UpdateFromFunctionResource();
 			if (DitherCall->FunctionInputs.Num() > 0)
 			{
-				DitherCall->FunctionInputs[0].Input.Connect(0, EffectiveAlpha);
-				OpacitySource = DitherCall;
+				DitherCall->FunctionInputs[0].Input.Connect(0, ParentMaskInput);
+				ParentMask = DitherCall;
 			}
 		}
 	}
 	else
 	{
-		UE_LOG(LogPlanetTerrainNext, Warning, TEXT("DitherTemporalAA MF missing — OpacityMask uses raw EffectiveAlpha"));
+			UE_LOG(LogPlanetTerrainNext, Warning, TEXT("DitherTemporalAA MF missing — OpacityMask uses raw parent mask"));
 	}
+	// The child mask is the exact complement of the same binary parent mask.
+	auto* ChildMask = Cast<UMaterialExpressionOneMinus>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionOneMinus::StaticClass(), 120, 760));
+	ChildMask->Input.Connect(0, ParentMask);
+	auto* OpacitySource = Cast<UMaterialExpressionLinearInterpolate>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionLinearInterpolate::StaticClass(), 320, 760));
+	OpacitySource->A.Connect(0, ParentMask);
+	OpacitySource->B.Connect(0, ChildMask);
+	OpacitySource->Alpha.Connect(0, LodFadeRole);
 
 	UMaterialEditingLibrary::ConnectMaterialProperty(BaseColor, TEXT(""), MP_BaseColor);
 	UMaterialEditingLibrary::ConnectMaterialProperty(NormalLerp, TEXT(""), MP_Normal);
@@ -272,8 +277,8 @@ UMaterialInterface* GetOrCreateTransition()
 	if (GIsEditor)
 	{
 		if (UMaterialInterface* Created = CreateAndSave(
-			TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v5"),
-			TEXT("M_PlanetTerrainNextPatch_v5"), false))
+			TEXT("/SingularityPlanetTerrainNext/Materials/M_PlanetTerrainNextPatch_v7"),
+			TEXT("M_PlanetTerrainNextPatch_v7"), false))
 		{
 			return Created;
 		}
