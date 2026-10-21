@@ -118,6 +118,83 @@ bool FPlanetTerrainNextR11EdgeBandTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPlanetTerrainNextR11SpatialFadeTest,
+	"Singularity.PlanetTerrainNext.R11.SpatialFade",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetTerrainNextR11SpatialFadeTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	FPlanetTerrainNextLodFade Fade;
+	Fade.State = EPlanetTerrainNextLodFadeState::FadingToChildren;
+	Fade.Direction = 1;
+	Fade.Progress = 0.0f;
+	Fade.bSpatial = true;
+	Fade.AnchorDistanceM = 100.0;
+	Fade.DistanceSpanM = 20.0;
+	const FVector3d Camera(0.0, 0.0, 0.0);
+	PlanetTerrainNextLodFade::AdvanceSpatialFade(Fade, 100.0, Camera);
+	TestTrue(TEXT("stationary camera does not advance fade"), FMath::IsNearlyEqual(Fade.Progress, 0.0f));
+	PlanetTerrainNextLodFade::AdvanceSpatialFade(Fade, 90.0, FVector3d(10.0, 0.0, 0.0));
+	const float HalfProgress = Fade.Progress;
+	TestTrue(TEXT("camera movement advances spatial fade"), HalfProgress > 0.0f && HalfProgress < 1.0f);
+	PlanetTerrainNextLodFade::ReverseSpatialFade(Fade, 90.0, -1);
+	PlanetTerrainNextLodFade::AdvanceSpatialFade(Fade, 95.0, FVector3d(15.0, 0.0, 0.0));
+	TestTrue(TEXT("camera reversal preserves partial progress"), Fade.Progress > 0.0f && Fade.Progress < 1.0f);
+
+	FPlanetTerrainNextLodFade A = Fade;
+	FPlanetTerrainNextLodFade B = Fade;
+	A.State = B.State = EPlanetTerrainNextLodFadeState::FadingToChildren;
+	A.Direction = B.Direction = 1;
+	A.Progress = B.Progress = 0.0f;
+	A.AnchorDistanceM = B.AnchorDistanceM = 100.0;
+	A.DistanceSpanM = B.DistanceSpanM = 20.0;
+	PlanetTerrainNextLodFade::AdvanceSpatialFade(A, 80.0, FVector3d(20.0, 0.0, 0.0));
+	for (int32 Frame = 0; Frame < 4; ++Frame)
+	{
+		PlanetTerrainNextLodFade::AdvanceSpatialFade(B, 95.0 - Frame * 5.0, FVector3d(5.0 + Frame * 5.0, 0.0, 0.0));
+	}
+	TestTrue(TEXT("equal camera movement gives frame-rate independent progress"), FMath::IsNearlyEqual(A.Progress, B.Progress, 1.0e-4f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPlanetTerrainNextR11NeighborStitchTest,
+	"Singularity.PlanetTerrainNext.R11.NeighborStitchAndSkirtAlignment",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetTerrainNextR11NeighborStitchTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	FPlanetTerrainNextDescriptor Descriptor;
+	Descriptor.Seed = 17;
+	Descriptor.PlanetId = 17;
+	const FPlanetTerrainNextHeightField Field(Descriptor);
+	const FPlanetTerrainNextNodeId FineId(0, 3, 3, 3);
+	FPlanetTerrainNextPatchData Patch;
+	PlanetTerrainNextPatch::Build(Field, FineId, 100.0, Patch);
+	FPlanetTerrainNextEdgeAdjacency Adjacency[4];
+	Adjacency[0].bHasNeighbor = true;
+	Adjacency[0].bRequiresStitching = true;
+	Adjacency[0].NeighborId = FPlanetTerrainNextNodeId(0, 2, 1, 0);
+	Adjacency[0].NeighborEdge = EPlanetTerrainNextPatchEdge::Top;
+	PlanetTerrainNextPatch::ApplyNeighborEdgeStitching(Field, Patch, Adjacency);
+
+	for (int32 K = 0; K <= PlanetTerrainNextPatch::GridN; ++K)
+	{
+		const int32 Top = K;
+		const int32 Bottom = PlanetTerrainNextPatch::GridVertexCount + K;
+		TestTrue(FString::Printf(TEXT("fine/coarse stitched edge sample %d matches"), K),
+			(Patch.VerticesCm[Top] - Patch.CoarseVerticesCm[Top]).Size() < 0.01f);
+		const FVector3d Dir = PlanetTerrainNextPatch::VertexDirection(FineId, K, 0);
+		const FVector3d ExpectedBottom = FVector3d(Patch.VerticesCm[Top]) / PlanetTerrainNext::CmPerMeter - Dir * Patch.SkirtDepthM;
+		const FVector3d ActualBottom = FVector3d(Patch.VerticesCm[Bottom]) / PlanetTerrainNext::CmPerMeter;
+		TestTrue(FString::Printf(TEXT("skirt sample %d starts at rendered edge"), K), (ExpectedBottom - ActualBottom).Size() < 0.01);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FPlanetTerrainNextR11LodQueueRampTest,
 	"Singularity.PlanetTerrainNext.R11.LodQueueDistanceRamp",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
