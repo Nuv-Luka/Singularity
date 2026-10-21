@@ -74,6 +74,8 @@ struct FPlanetTerrainNextView
 struct FPlanetTerrainNextLodSettings
 {
 	double TargetPixelError = 4.0;
+	/** Queue/refine at this multiple of the normal distance by lowering the effective SSE threshold. */
+	double QueueDistanceScale = 2.0;
 	/** Merge when the projected error falls below Target / MergeHysteresis. */
 	double MergeHysteresis = 1.5;
 	int32 MaxLevel = 17;

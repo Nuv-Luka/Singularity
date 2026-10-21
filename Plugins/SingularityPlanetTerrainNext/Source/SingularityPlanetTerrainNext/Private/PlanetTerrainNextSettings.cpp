@@ -9,6 +9,11 @@ TAutoConsoleVariable<float> CVarTargetPixelError(
 	4.0f,
 	TEXT("Split a patch when its projected geometric error exceeds this many pixels."));
 
+TAutoConsoleVariable<float> CVarLodQueueDistanceScale(
+	TEXT("singularity.TerrainNext.LodQueueDistanceScale"),
+	2.0f,
+	TEXT("Queue and refine LOD patches this many times farther away than the normal target. 2 = twice the distance."));
+
 TAutoConsoleVariable<int32> CVarMaxLevel(
 	TEXT("singularity.TerrainNext.MaxLevel"),
 	17,
@@ -21,8 +26,8 @@ TAutoConsoleVariable<int32> CVarMaxPatches(
 
 TAutoConsoleVariable<float> CVarBuildBudgetMs(
 	TEXT("singularity.TerrainNext.BuildBudgetMs"),
-	2.0f,
-	TEXT("Game-thread milliseconds per frame for CPU patch builds (at least one build per frame)."));
+	6.0f,
+	TEXT("Game-thread milliseconds per frame for CPU patch builds (default 6 ms; at least one build per frame)."));
 
 TAutoConsoleVariable<bool> CVarFreezeLod(
 	TEXT("singularity.TerrainNext.FreezeLod"),
@@ -239,6 +244,7 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 {
 	FPlanetTerrainNextRuntimeSettings Out;
 	Out.Lod.TargetPixelError = FMath::Max(0.25, static_cast<double>(CVarTargetPixelError.GetValueOnGameThread()));
+	Out.Lod.QueueDistanceScale = FMath::Clamp(static_cast<double>(CVarLodQueueDistanceScale.GetValueOnGameThread()), 1.0, 4.0);
 	Out.Lod.MaxLevel = FMath::Clamp(CVarMaxLevel.GetValueOnGameThread(), 0, 24);
 	Out.Lod.MaxNodes = FMath::Clamp(CVarMaxPatches.GetValueOnGameThread(), 6, 16384);
 	Out.Lod.bFreeze = CVarFreezeLod.GetValueOnGameThread();

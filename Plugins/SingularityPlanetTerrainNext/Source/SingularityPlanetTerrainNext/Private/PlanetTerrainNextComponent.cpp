@@ -2113,10 +2113,11 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 	const double SchedStart = FPlatformTime::Seconds();
 	TArray<FPlanetTerrainNextTileRequest> Desired;
+	const double QueueTargetPixelError = Settings.Lod.TargetPixelError / FMath::Max(1.0, Settings.Lod.QueueDistanceScale);
 	Planner.Plan(
 		Pending,
 		[this](const FPlanetTerrainNextNodeId& NodeId) { return MakeTileId(NodeId); },
-		Settings.Lod.TargetPixelError,
+		QueueTargetPixelError,
 		FrameCounter,
 		Settings.PrefetchPerFrame,
 		Desired);
