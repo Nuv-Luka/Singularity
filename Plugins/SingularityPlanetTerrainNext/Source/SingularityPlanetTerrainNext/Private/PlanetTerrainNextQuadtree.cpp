@@ -121,6 +121,58 @@ FPlanetTerrainNextQuadtree::FNode* FPlanetTerrainNextQuadtree::FindNode(const FP
 	return Node && Node->Id == Id ? Node : nullptr;
 }
 
+FPlanetTerrainNextQuadtree::FNode* FPlanetTerrainNextQuadtree::FindLeafForDirection(const FVector3d& Direction) const
+{
+	int32 Face = 0;
+	double U = 0.5;
+	double V = 0.5;
+	PlanetTerrainNext::DirectionToFaceUV(Direction, Face, U, V);
+	if (Face < 0 || Face >= 6 || !Roots[Face].IsValid())
+	{
+		return nullptr;
+	}
+
+	FNode* Node = Roots[Face].Get();
+	while (Node && Node->HasChildren())
+	{
+		const double MidU = 0.5 * (Node->Id.U0() + Node->Id.U1());
+		const double MidV = 0.5 * (Node->Id.V0() + Node->Id.V1());
+		const int32 ChildIndex = (U >= MidU ? 1 : 0) | (V >= MidV ? 2 : 0);
+		Node = Node->Children[ChildIndex].Get();
+	}
+	return Node;
+}
+
+bool FPlanetTerrainNextQuadtree::WouldViolateTwoToOne(const FNode& Node) const
+{
+	if (Node.Id.Level == 0)
+	{
+		return false;
+	}
+
+	// Sample just outside the midpoint of each edge. FacePoint accepts the
+	// small out-of-face coordinate and DirectionToFaceUV resolves cube-face
+	// orientation, including edges shared by different faces.
+	const double EdgeEpsilon = FMath::Max(Node.Id.Size() * 1.0e-7, 1.0e-10);
+	const double MidU = 0.5 * (Node.Id.U0() + Node.Id.U1());
+	const double MidV = 0.5 * (Node.Id.V0() + Node.Id.V1());
+	const double Samples[4][2] = {
+		{MidU, Node.Id.V0() - EdgeEpsilon},
+		{MidU, Node.Id.V1() + EdgeEpsilon},
+		{Node.Id.U0() - EdgeEpsilon, MidV},
+		{Node.Id.U1() + EdgeEpsilon, MidV},
+	};
+	for (const double (&Sample)[2] : Samples)
+	{
+		const FNode* Neighbor = FindLeafForDirection(PlanetTerrainNext::FacePoint(Node.Id.Face, Sample[0], Sample[1]));
+		if (Neighbor && static_cast<int32>(Neighbor->Id.Level) + 1 < static_cast<int32>(Node.Id.Level))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void FPlanetTerrainNextQuadtree::SetNodeHeightRange(const FPlanetTerrainNextNodeId& Id, double MinHeightM, double MaxHeightM)
 {
 	if (FNode* Node = FindNode(Id))
@@ -292,6 +344,7 @@ void FPlanetTerrainNextQuadtree::Update(
 	Stats.Splits = 0;
 	Stats.Merges = 0;
 	Stats.BudgetBlocked = 0;
+	Stats.BalanceBlocked = 0;
 	Stats.VisibleNodes = 0;
 	if (!IsInitialized())
 	{
@@ -323,6 +376,11 @@ void FPlanetTerrainNextQuadtree::Update(
 		const int32 MaxNodes = FMath::Max(Settings.MaxNodes, 6);
 		for (FNode* Node : Candidates)
 		{
+			if (WouldViolateTwoToOne(*Node))
+			{
+				++Stats.BalanceBlocked;
+				continue;
+			}
 			if (NodeCount + 4 > MaxNodes)
 			{
 				++Stats.BudgetBlocked;

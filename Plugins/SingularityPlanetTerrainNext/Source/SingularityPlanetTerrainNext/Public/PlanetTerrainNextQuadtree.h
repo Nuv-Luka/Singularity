@@ -111,6 +111,7 @@ struct FPlanetTerrainNextQuadtreeStats
 	int32 Splits = 0;
 	int32 Merges = 0;
 	int32 BudgetBlocked = 0;
+	int32 BalanceBlocked = 0;
 	int32 VisibleNodes = 0;
 };
 
@@ -158,6 +159,8 @@ private:
 	void MakeNode(FNode& Node, const FPlanetTerrainNextNodeId& Id, double MinH, double MaxH) const;
 	void RecomputeBounds(FNode& Node) const;
 	FNode* FindNode(const FPlanetTerrainNextNodeId& Id) const;
+	FNode* FindLeafForDirection(const FVector3d& Direction) const;
+	bool WouldViolateTwoToOne(const FNode& Node) const;
 	bool IsVisible(const FNode& Node, const FPlanetTerrainNextView& View, const FPlanetTerrainNextLodSettings& Settings) const;
 	double PixelError(const FNode& Node, const FPlanetTerrainNextView& View) const;
 	double WeightedPixelError(const FNode& Node, const FPlanetTerrainNextView& View, const FPlanetTerrainNextLodSettings& Settings) const;
