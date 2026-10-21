@@ -155,6 +155,63 @@ void SPlanetTerrainNextSpawnPanel::Construct(const FArguments& InArgs)
 								.AllowSpin(true)
 							]
 						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 12.0f, 0.0f, 4.0f)
+						[
+							SectionHeader(TEXT("Geology (opt-in)"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f)
+						[
+							SNew(SCheckBox)
+							.IsChecked_Lambda([this]()
+							{
+								return Descriptor.bEnableGeologicalBiomes ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+							})
+							.OnCheckStateChanged_Lambda([this](ECheckBoxState State)
+							{
+								Descriptor.bEnableGeologicalBiomes = State == ECheckBoxState::Checked;
+							})
+							[
+								SNew(STextBlock).Text(FText::FromString(TEXT("Enable geological terrain")))
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							SNew(STextBlock)
+							.Text_Lambda([this]()
+							{
+								static const TCHAR* Names[] = {TEXT("Mixed Surface"), TEXT("Young Mare"), TEXT("Ancient Highland")};
+								return FText::FromString(FString::Printf(TEXT("Preset: %s"), Names[FMath::Clamp(Descriptor.GeologyPreset, 0, 2)]));
+							})
+							.ColorAndOpacity(DimTextColor())
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(1.0f)
+							[
+								MakeButton(TEXT("Mixed"), FOnClicked::CreateLambda([this]()
+								{
+									Descriptor.GeologyPreset = 0;
+									return FReply::Handled();
+								}))
+							]
+							+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(1.0f)
+							[
+								MakeButton(TEXT("Young Mare"), FOnClicked::CreateLambda([this]()
+								{
+									Descriptor.GeologyPreset = 1;
+									return FReply::Handled();
+								}))
+							]
+							+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(1.0f)
+							[
+								MakeButton(TEXT("Highland"), FOnClicked::CreateLambda([this]()
+								{
+									Descriptor.GeologyPreset = 2;
+									return FReply::Handled();
+								}))
+							]
+						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f)
 						[
 							SNew(SHorizontalBox)

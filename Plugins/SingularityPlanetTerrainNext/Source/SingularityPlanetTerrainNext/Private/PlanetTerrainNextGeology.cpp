@@ -4,43 +4,43 @@
 
 namespace
 {
-constexpr uint64 GoldenGamma = 0x9E3779B97F4A7C15ull;
+constexpr uint64 GeologyGoldenGamma = 0x9E3779B97F4A7C15ull;
 
-FORCEINLINE uint64 Mix64(uint64 Z)
+FORCEINLINE uint64 GeologyMix64(uint64 Z)
 {
 	Z = (Z ^ (Z >> 30)) * 0xBF58476D1CE4E5B9ull;
 	Z = (Z ^ (Z >> 27)) * 0x94D049BB133111EBull;
 	return Z ^ (Z >> 31);
 }
 
-FORCEINLINE uint64 HashStep(uint64 State, uint64 Value)
+FORCEINLINE uint64 GeologyHashStep(uint64 State, uint64 Value)
 {
-	return Mix64(State ^ (Value + GoldenGamma + (State << 6) + (State >> 2)));
+	return GeologyMix64(State ^ (Value + GeologyGoldenGamma + (State << 6) + (State >> 2)));
 }
 
-struct FSplitMixRng
+struct FGeologySplitMixRng
 {
 	uint64 State = 0;
 
 	double Next01()
 	{
-		State += GoldenGamma;
-		return static_cast<double>(Mix64(State) >> 11) * (1.0 / 9007199254740992.0);
+		State += GeologyGoldenGamma;
+		return static_cast<double>(GeologyMix64(State) >> 11) * (1.0 / 9007199254740992.0);
 	}
 };
 
-FORCEINLINE double SmoothStep(double T)
+FORCEINLINE double GeologySmoothStep(double T)
 {
 	T = FMath::Clamp(T, 0.0, 1.0);
 	return T * T * (3.0 - 2.0 * T);
 }
 
-FORCEINLINE double AngleBetweenUnit(const FVector3d& A, const FVector3d& B)
+FORCEINLINE double GeologyAngleBetweenUnit(const FVector3d& A, const FVector3d& B)
 {
 	return FMath::Atan2(FVector3d::CrossProduct(A, B).Length(), FVector3d::DotProduct(A, B));
 }
 
-FORCEINLINE uint64 DoubleBits(double Value)
+FORCEINLINE uint64 GeologyDoubleBits(double Value)
 {
 	uint64 Bits = 0;
 	FMemory::Memcpy(&Bits, &Value, sizeof(Bits));
@@ -49,8 +49,8 @@ FORCEINLINE uint64 DoubleBits(double Value)
 
 FORCEINLINE FVector3d SeedDirection(uint64 Seed)
 {
-	const double Z = static_cast<double>(Mix64(Seed) >> 11) * (2.0 / 9007199254740992.0) - 1.0;
-	const double Phi = static_cast<double>(Mix64(Seed ^ 0xA5A5A5A5ull) >> 11)
+	const double Z = static_cast<double>(GeologyMix64(Seed) >> 11) * (2.0 / 9007199254740992.0) - 1.0;
+	const double Phi = static_cast<double>(GeologyMix64(Seed ^ 0xA5A5A5A5ull) >> 11)
 		* (2.0 * PI / 9007199254740992.0);
 	const double S = FMath::Sqrt(FMath::Max(0.0, 1.0 - Z * Z));
 	return FVector3d(S * FMath::Cos(Phi), S * FMath::Sin(Phi), Z);
@@ -63,7 +63,7 @@ FORCEINLINE double EventEnvelope(
 	double SampleFootprintMeters)
 {
 	const double Feather = FMath::Max(Event.InfluenceRadiusMeters * 0.12, SampleFootprintMeters);
-	const double Base = 1.0 - SmoothStep(
+	const double Base = 1.0 - GeologySmoothStep(
 		(DistanceMeters - Event.InfluenceRadiusMeters + Feather) / (2.0 * Feather));
 	if (Base <= 0.0)
 	{
@@ -99,13 +99,13 @@ FPlanetTerrainNextGeologySettings FPlanetTerrainNextGeologySettings::FromDescrip
 
 uint64 FPlanetTerrainNextGeologySettings::GetStableHash() const
 {
-	uint64 Hash = HashStep(0x47454F4Cull, Version);
-	Hash = HashStep(Hash, bEnableGeologicalBiomes ? 1ull : 0ull);
-	Hash = HashStep(Hash, static_cast<uint64>(Preset));
-	Hash = HashStep(Hash, static_cast<uint64>(BasinCount));
-	Hash = HashStep(Hash, static_cast<uint64>(ImpactCount));
-	Hash = HashStep(Hash, DoubleBits(OldestAgeMyrBP));
-	return HashStep(Hash, DoubleBits(YoungestAgeMyrBP));
+	uint64 Hash = GeologyHashStep(0x47454F4Cull, Version);
+	Hash = GeologyHashStep(Hash, bEnableGeologicalBiomes ? 1ull : 0ull);
+	Hash = GeologyHashStep(Hash, static_cast<uint64>(Preset));
+	Hash = GeologyHashStep(Hash, static_cast<uint64>(BasinCount));
+	Hash = GeologyHashStep(Hash, static_cast<uint64>(ImpactCount));
+	Hash = GeologyHashStep(Hash, GeologyDoubleBits(OldestAgeMyrBP));
+	return GeologyHashStep(Hash, GeologyDoubleBits(YoungestAgeMyrBP));
 }
 
 void FPlanetTerrainNextSurfaceSample::NormalizeWeights()
@@ -136,7 +136,7 @@ double GreatCircleDistanceMeters(const FVector3d& AUnit, const FVector3d& BUnit,
 {
 	const FVector3d A = AUnit.GetSafeNormal();
 	const FVector3d B = BUnit.GetSafeNormal();
-	return FMath::Max(0.0, RadiusMeters) * AngleBetweenUnit(A, B);
+	return FMath::Max(0.0, RadiusMeters) * GeologyAngleBetweenUnit(A, B);
 }
 
 void BuildTangentFrame(const FVector3d& CenterUnit, FVector3d& OutEast, FVector3d& OutNorth)
@@ -164,9 +164,9 @@ FPlanetTerrainNextGeologyModel::FPlanetTerrainNextGeologyModel(
 {
 	uint64 RadiusBits = 0;
 	FMemory::Memcpy(&RadiusBits, &RadiusMeters, sizeof(RadiusBits));
-	IdentityHash = HashStep(HashStep(HashStep(0x47454F4D4F44454Cull, static_cast<uint64>(Descriptor.PlanetId)), static_cast<uint64>(Descriptor.Seed)), static_cast<uint64>(Descriptor.GeneratorVersion));
-	IdentityHash = HashStep(IdentityHash, RadiusBits);
-	IdentityHash = HashStep(IdentityHash, Settings.GetStableHash());
+	IdentityHash = GeologyHashStep(GeologyHashStep(GeologyHashStep(0x47454F4D4F44454Cull, static_cast<uint64>(Descriptor.PlanetId)), static_cast<uint64>(Descriptor.Seed)), static_cast<uint64>(Descriptor.GeneratorVersion));
+	IdentityHash = GeologyHashStep(IdentityHash, RadiusBits);
+	IdentityHash = GeologyHashStep(IdentityHash, Settings.GetStableHash());
 
 	SpatialBins.SetNum(6 * SpatialBinsPerFace * SpatialBinsPerFace);
 	GenerateEvents(Descriptor);
@@ -179,7 +179,7 @@ FPlanetTerrainNextGeologyModel::FPlanetTerrainNextGeologyModel(
 void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDescriptor& Descriptor)
 {
 	Events.Reset();
-	FSplitMixRng Rng{HashStep(static_cast<uint64>(Descriptor.Seed), 0x4556454E5453ull)};
+	FGeologySplitMixRng Rng{GeologyHashStep(static_cast<uint64>(Descriptor.Seed), 0x4556454E5453ull)};
 	auto RandomDirection = [&Rng]()
 	{
 		const double Z = Rng.Next01() * 2.0 - 1.0;
@@ -207,7 +207,7 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.CentralPeakMeters = 0.0;
 		Event.RayInfluenceRadiusMeters = 0.0;
 		Event.CompositionStrength = 0.65f;
-		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
+		Event.LocalSeed = GeologyHashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
 
 		// Separate basin-local basalt episodes approximate reachable flooding. The
 		// flood mask is analytic in this first visual stage; it is intentionally
@@ -232,7 +232,7 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 			Flow.CentralPeakMeters = 0.0;
 			Flow.RayInfluenceRadiusMeters = 0.0;
 			Flow.CompositionStrength = static_cast<float>(FMath::Lerp(0.55, 0.9, Rng.Next01()));
-			Flow.LocalSeed = HashStep(Event.LocalSeed, static_cast<uint64>(Episode + 1));
+			Flow.LocalSeed = GeologyHashStep(Event.LocalSeed, static_cast<uint64>(Episode + 1));
 		}
 	}
 
@@ -255,26 +255,26 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.CentralPeakMeters = Radius > 50000.0 ? Event.ReliefMeters * 0.18 : 0.0;
 		Event.RayInfluenceRadiusMeters = Radius * 8.0;
 		Event.CompositionStrength = static_cast<float>(FMath::Lerp(0.2, 0.8, Rng.Next01()));
-		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
+		Event.LocalSeed = GeologyHashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
 	}
 
 	Events.Sort([](const FPlanetTerrainNextGeologyEvent& A, const FPlanetTerrainNextGeologyEvent& B)
 	{
 		return A.AgeMyrBP > B.AgeMyrBP;
 	});
-	IdentityHash = HashStep(IdentityHash, static_cast<uint64>(Events.Num()));
+	IdentityHash = GeologyHashStep(IdentityHash, static_cast<uint64>(Events.Num()));
 	for (const FPlanetTerrainNextGeologyEvent& Event : Events)
 	{
-		IdentityHash = HashStep(IdentityHash, Event.Id);
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RadiusMeters));
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.AgeMyrBP));
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.FillHeightMeters));
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.ShorelineWidthMeters));
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.BowlDepthMeters));
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RimHeightMeters));
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.CentralPeakMeters));
-		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RayInfluenceRadiusMeters));
-		IdentityHash = HashStep(IdentityHash, Event.LocalSeed);
+		IdentityHash = GeologyHashStep(IdentityHash, Event.Id);
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.RadiusMeters));
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.AgeMyrBP));
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.FillHeightMeters));
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.ShorelineWidthMeters));
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.BowlDepthMeters));
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.RimHeightMeters));
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.CentralPeakMeters));
+		IdentityHash = GeologyHashStep(IdentityHash, GeologyDoubleBits(Event.RayInfluenceRadiusMeters));
+		IdentityHash = GeologyHashStep(IdentityHash, Event.LocalSeed);
 	}
 }
 
@@ -456,7 +456,7 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 				if (Fresh > 0.02 && Distance > Event.RadiusMeters * 0.8)
 				{
 					const double RayFeather = FMath::Max(Event.RayInfluenceRadiusMeters * 0.08, Footprint);
-					const double RayInfluence = 1.0 - SmoothStep(
+					const double RayInfluence = 1.0 - GeologySmoothStep(
 						(Distance - Event.RayInfluenceRadiusMeters + RayFeather) / (2.0 * RayFeather));
 					if (RayInfluence <= 0.0)
 					{
@@ -473,7 +473,7 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 					double BestRay = 0.0;
 					for (int32 RayIndex = 0; RayIndex < 4; ++RayIndex)
 					{
-						const uint64 RaySeed = Mix64(Event.LocalSeed ^ (0x9E3779B97F4A7C15ull * static_cast<uint64>(RayIndex + 1)));
+						const uint64 RaySeed = GeologyMix64(Event.LocalSeed ^ (0x9E3779B97F4A7C15ull * static_cast<uint64>(RayIndex + 1)));
 						const double Unit = static_cast<double>(RaySeed >> 11) * (1.0 / 9007199254740992.0);
 						const double Bearing = Unit * 2.0 * PI;
 						const double Length = FMath::Lerp(2.5, 8.0, static_cast<double>((RaySeed >> 28) & 0xffff) / 65535.0);
