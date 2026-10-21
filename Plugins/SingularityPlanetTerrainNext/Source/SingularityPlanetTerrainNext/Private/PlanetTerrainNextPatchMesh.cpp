@@ -424,7 +424,18 @@ void BuildFromTile(
 			const FVector3d CoarseN = NormalOf(CoarseHalo, I, J, HaloDirs[HI]);
 			const FVector3d Tangent = (FineHalo[HaloIndex(I + 1, J)] - FineHalo[HaloIndex(I - 1, J)]).GetSafeNormal();
 
-			EmitVertex(GridIndex(I, J), Fine, Coarse, FineN, CoarseN, Tangent,
+			// Mixed-LOD edges meet the parent-compatible surface in a narrow,
+			// deterministic band. The edge row is exactly coarse; the adjacent
+			// row is a half blend. Interior vertices retain their fine detail.
+			// This makes the edge watertight even while legacy morph/WPO is off.
+			const int32 EdgeDistance = FMath::Min(FMath::Min(I, GridN - I), FMath::Min(J, GridN - J));
+			const double EdgeBlend = Id.Level > 0
+				? FMath::Clamp(1.0 - static_cast<double>(EdgeDistance) / 2.0, 0.0, 1.0)
+				: 0.0;
+			const FVector3d DisplayFine = FMath::Lerp(Fine, Coarse, EdgeBlend);
+			const FVector3d DisplayNormal = FMath::Lerp(FineN, CoarseN, EdgeBlend).GetSafeNormal();
+
+			EmitVertex(GridIndex(I, J), DisplayFine, Coarse, DisplayNormal, CoarseN, Tangent,
 				FVector2D(static_cast<double>(I) / GridN, static_cast<double>(J) / GridN));
 		}
 	}

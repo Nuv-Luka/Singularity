@@ -8,10 +8,11 @@ Branch: `feature/planet-terrain-next-r11-visual-lod`
 - `UploadPatch()` now rejects invalid pooled meshes and mismatched vertex attributes before entering `UProceduralMeshComponent`.
 - R11 stage B adds cube-face-aware neighbor lookup and a conservative 2:1 quadtree balance gate. A split is deferred when any sampled neighbor edge is two or more levels coarser; the existing covering patch remains active.
 - `FPlanetTerrainNextQuadtreeStats::BalanceBlocked` records balance deferrals for telemetry.
+- Child patch baking now applies a two-row local edge band: the boundary row is parent-compatible and the adjacent row is half blended, with fine geological detail preserved in the interior.
 
 ## Validation
 
-- `R11` automation: 2/2 passed (`ComplementaryDitherCoverage`, `MergeKeepsBothSidesResident`).
+- `R11` automation: 3/3 passed (`ComplementaryDitherCoverage`, `EdgeBandConstrainsMixedLodBoundary`, `MergeKeepsBothSidesResident`).
 - `R10` automation: 4/4 passed (`DiagCollectNodes`, `FlatGeometryL0L1L2`, `HeightGeometryL0L1L2`, `LodFadeComplement`).
 - Editor was rebuilt and reopened after the stage B change.
 

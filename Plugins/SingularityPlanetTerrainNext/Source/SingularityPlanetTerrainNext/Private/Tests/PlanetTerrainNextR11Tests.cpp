@@ -1,5 +1,7 @@
 #include "Misc/AutomationTest.h"
+#include "PlanetTerrainNextHeightField.h"
 #include "PlanetTerrainNextLodFade.h"
+#include "PlanetTerrainNextPatchMesh.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -73,6 +75,44 @@ bool FPlanetTerrainNextR11MergeResidencyTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("merge endpoint is stable"),
 		static_cast<int32>(Fades[0].State),
 		static_cast<int32>(EPlanetTerrainNextLodFadeState::Stable));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPlanetTerrainNextR11EdgeBandTest,
+	"Singularity.PlanetTerrainNext.R11.EdgeBandConstrainsMixedLodBoundary",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetTerrainNextR11EdgeBandTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	FPlanetTerrainNextDescriptor Descriptor;
+	Descriptor.Seed = 11;
+	Descriptor.PlanetId = 11;
+	Descriptor.GeneratorVersion = 1;
+	const FPlanetTerrainNextHeightField Field(Descriptor);
+	FPlanetTerrainNextPatchData Patch;
+	PlanetTerrainNextPatch::Build(Field, FPlanetTerrainNextNodeId(0, 3, 3, 4), 0.0, Patch);
+
+	double MaxEdgeGapCm = 0.0;
+	for (int32 J = 0; J <= PlanetTerrainNextPatch::GridN; ++J)
+	{
+		for (int32 I = 0; I <= PlanetTerrainNextPatch::GridN; ++I)
+		{
+			if (I != 0 && I != PlanetTerrainNextPatch::GridN
+				&& J != 0 && J != PlanetTerrainNextPatch::GridN)
+			{
+				continue;
+			}
+			const int32 Index = J * PlanetTerrainNextPatch::Row + I;
+			MaxEdgeGapCm = FMath::Max(
+				MaxEdgeGapCm,
+				static_cast<double>((Patch.VerticesCm[Index] - Patch.CoarseVerticesCm[Index]).Size()));
+		}
+	}
+	AddInfo(FString::Printf(TEXT("edge band max fine/coarse gap %.6f cm"), MaxEdgeGapCm));
+	TestTrue(TEXT("levelled child edge is parent-compatible"), MaxEdgeGapCm < 0.01);
+	TestEqual(TEXT("edge-band patch has canonical topology"), Patch.VerticesCm.Num(), PlanetTerrainNextPatch::VertexCount);
 	return true;
 }
 
