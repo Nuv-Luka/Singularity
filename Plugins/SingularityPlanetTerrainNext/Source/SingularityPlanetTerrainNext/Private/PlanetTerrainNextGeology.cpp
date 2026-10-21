@@ -205,6 +205,7 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.BowlDepthMeters = FMath::Abs(Event.ReliefMeters);
 		Event.RimHeightMeters = Event.RimMeters;
 		Event.CentralPeakMeters = 0.0;
+		Event.RayInfluenceRadiusMeters = 0.0;
 		Event.CompositionStrength = 0.65f;
 		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
 
@@ -229,6 +230,7 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 			Flow.BowlDepthMeters = 0.0;
 			Flow.RimHeightMeters = 0.0;
 			Flow.CentralPeakMeters = 0.0;
+			Flow.RayInfluenceRadiusMeters = 0.0;
 			Flow.CompositionStrength = static_cast<float>(FMath::Lerp(0.55, 0.9, Rng.Next01()));
 			Flow.LocalSeed = HashStep(Event.LocalSeed, static_cast<uint64>(Episode + 1));
 		}
@@ -251,6 +253,7 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.BowlDepthMeters = Event.ReliefMeters;
 		Event.RimHeightMeters = Event.ReliefMeters * 0.3;
 		Event.CentralPeakMeters = Radius > 50000.0 ? Event.ReliefMeters * 0.18 : 0.0;
+		Event.RayInfluenceRadiusMeters = Radius * 8.0;
 		Event.CompositionStrength = static_cast<float>(FMath::Lerp(0.2, 0.8, Rng.Next01()));
 		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
 	}
@@ -270,6 +273,7 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.BowlDepthMeters));
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RimHeightMeters));
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.CentralPeakMeters));
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RayInfluenceRadiusMeters));
 		IdentityHash = HashStep(IdentityHash, Event.LocalSeed);
 	}
 }
@@ -287,7 +291,8 @@ void FPlanetTerrainNextGeologyModel::AddEventToSpatialIndex(int32 EventIndex)
 	PlanetTerrainNext::DirectionToFaceUV(Event.CenterUnit, Face, U, V);
 	const int32 X = FMath::Clamp(FMath::FloorToInt(U * SpatialBinsPerFace), 0, SpatialBinsPerFace - 1);
 	const int32 Y = FMath::Clamp(FMath::FloorToInt(V * SpatialBinsPerFace), 0, SpatialBinsPerFace - 1);
-	const int32 RadiusBins = Event.InfluenceRadiusMeters > RadiusMeters * 0.25 ? SpatialBinsPerFace : 1;
+	const double MaxInfluence = FMath::Max(Event.InfluenceRadiusMeters, Event.RayInfluenceRadiusMeters);
+	const int32 RadiusBins = MaxInfluence > RadiusMeters * 0.25 ? SpatialBinsPerFace : 1;
 	for (int32 Oy = -RadiusBins; Oy <= RadiusBins; ++Oy)
 	{
 		for (int32 Ox = -RadiusBins; Ox <= RadiusBins; ++Ox)
@@ -379,7 +384,10 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 		const FPlanetTerrainNextGeologyEvent& Event = Events[EventIndex];
 		const double Distance = PlanetTerrainNextGeology::GreatCircleDistanceMeters(Direction, Event.CenterUnit, RadiusMeters);
 		const double Influence = EventEnvelope(Event, Direction, Distance, Footprint);
-		if (Influence <= 0.0)
+		const double RayReach = Event.RayInfluenceRadiusMeters;
+		const bool bRayCandidate = Event.Type == EPlanetTerrainNextGeologyEventType::Impact
+			&& RayReach > 0.0 && Distance <= RayReach * 1.1;
+		if (Influence <= 0.0 && !bRayCandidate)
 		{
 			continue;
 		}
@@ -441,6 +449,42 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 					Morphology += Event.CentralPeakMeters * Degradation * PeakShape * Band;
 				}
 				Sample.HeightOffsetM += Morphology * Influence;
+
+				// Directional bright rays are material-only features. Their bearings,
+				// lengths, and widths come from the immutable event seed, so the field
+				// remains stable across tiles and cube-face boundaries.
+				if (Fresh > 0.02 && Distance > Event.RadiusMeters * 0.8)
+				{
+					const double RayFeather = FMath::Max(Event.RayInfluenceRadiusMeters * 0.08, Footprint);
+					const double RayInfluence = 1.0 - SmoothStep(
+						(Distance - Event.RayInfluenceRadiusMeters + RayFeather) / (2.0 * RayFeather));
+					if (RayInfluence <= 0.0)
+					{
+						continue;
+					}
+					FVector3d East;
+					FVector3d North;
+					PlanetTerrainNextGeology::BuildTangentFrame(Event.CenterUnit, East, North);
+					const FVector3d Tangent = (Direction - Event.CenterUnit * FVector3d::DotProduct(Direction, Event.CenterUnit)).GetSafeNormal();
+					const double Theta = FMath::Atan2(
+						FVector3d::DotProduct(Tangent, North),
+						FVector3d::DotProduct(Tangent, East));
+					const double Radial = Distance / FMath::Max(Event.RadiusMeters, 1.0);
+					double BestRay = 0.0;
+					for (int32 RayIndex = 0; RayIndex < 4; ++RayIndex)
+					{
+						const uint64 RaySeed = Mix64(Event.LocalSeed ^ (0x9E3779B97F4A7C15ull * static_cast<uint64>(RayIndex + 1)));
+						const double Unit = static_cast<double>(RaySeed >> 11) * (1.0 / 9007199254740992.0);
+						const double Bearing = Unit * 2.0 * PI;
+						const double Length = FMath::Lerp(2.5, 8.0, static_cast<double>((RaySeed >> 28) & 0xffff) / 65535.0);
+						const double Width = FMath::Lerp(0.045, 0.12, static_cast<double>((RaySeed >> 44) & 0xffff) / 65535.0);
+						const double Angular = PlanetTerrainNextGeology::WrappedAngleRadians(Theta, Bearing);
+						const double AngularMask = FMath::Exp(-0.5 * FMath::Square(Angular / Width));
+						const double RadialMask = FMath::Clamp(1.0 - (Radial - 1.0) / FMath::Max(Length, 1.0), 0.0, 1.0);
+						BestRay = FMath::Max(BestRay, AngularMask * RadialMask);
+					}
+					Sample.RayIntensity = FMath::Max(Sample.RayIntensity, BestRay * Fresh * RayInfluence);
+				}
 			}
 		}
 	}

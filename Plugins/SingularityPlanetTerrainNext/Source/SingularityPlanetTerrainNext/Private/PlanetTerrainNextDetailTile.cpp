@@ -48,8 +48,10 @@ FLinearColor AlbedoFromTerrain(
 
 		const float Slope = static_cast<float>(FMath::Clamp(Slope01, 0.0, 1.0));
 		const float Fresh = static_cast<float>(FMath::Clamp(Geology.Freshness, 0.0, 1.0));
+		const float Rays = static_cast<float>(FMath::Clamp(Geology.RayIntensity, 0.0, 1.0));
 		Result *= FMath::Lerp(0.94f, 1.06f, Slope);
 		Result = FMath::Lerp(Result, Ejecta, 0.10f * Fresh);
+		Result = FMath::Lerp(Result, Ejecta, 0.32f * Rays);
 		Result.A = 1.0f;
 		return Result.GetClamped();
 	}

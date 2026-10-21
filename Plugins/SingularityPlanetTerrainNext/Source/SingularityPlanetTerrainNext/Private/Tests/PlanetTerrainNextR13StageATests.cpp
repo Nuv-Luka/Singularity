@@ -266,4 +266,46 @@ bool FPlanetTerrainNextR13GeologyMorphologyTest::RunTest(const FString& Paramete
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPlanetTerrainNextR13GeologyRaysTest,
+	"Singularity.PlanetTerrainNext.R13.StageD.Rays",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetTerrainNextR13GeologyRaysTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	const FPlanetTerrainNextGeologyModel Model(StageBDescriptor());
+	const FPlanetTerrainNextGeologyEvent* YoungestImpact = nullptr;
+	for (const FPlanetTerrainNextGeologyEvent& Event : Model.GetEvents())
+	{
+		if (Event.Type == EPlanetTerrainNextGeologyEventType::Impact
+			&& (!YoungestImpact || Event.AgeMyrBP < YoungestImpact->AgeMyrBP))
+		{
+			YoungestImpact = &Event;
+		}
+	}
+	TestTrue(TEXT("catalog contains a ray source impact"), YoungestImpact != nullptr);
+	if (!YoungestImpact)
+	{
+		return false;
+	}
+
+	FVector3d East;
+	FVector3d North;
+	PlanetTerrainNextGeology::BuildTangentFrame(YoungestImpact->CenterUnit, East, North);
+	const double Alpha = FMath::Clamp(3.0 * YoungestImpact->RadiusMeters / 1737000.0, 0.01, 0.6);
+	double MaxRay = 0.0;
+	for (int32 Index = 0; Index < 128; ++Index)
+	{
+		const double Theta = (2.0 * UE_DOUBLE_PI * static_cast<double>(Index)) / 128.0;
+		const FVector3d Direction = (YoungestImpact->CenterUnit * FMath::Cos(Alpha)
+			+ (East * FMath::Cos(Theta) + North * FMath::Sin(Theta)) * FMath::Sin(Alpha)).GetSafeNormal();
+		const FPlanetTerrainNextSurfaceSample Sample = Model.SampleSurface(Direction, 100.0);
+		TestTrue(TEXT("ray sample finite"), FMath::IsFinite(Sample.RayIntensity));
+		MaxRay = FMath::Max(MaxRay, Sample.RayIntensity);
+	}
+	TestTrue(TEXT("young impact produces directional ray signal"), MaxRay > 0.001);
+	return true;
+}
+
 #endif

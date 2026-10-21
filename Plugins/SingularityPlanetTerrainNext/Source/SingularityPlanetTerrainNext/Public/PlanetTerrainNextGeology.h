@@ -55,6 +55,7 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextGeologyEvent
 	double BowlDepthMeters = 0.0;
 	double RimHeightMeters = 0.0;
 	double CentralPeakMeters = 0.0;
+	double RayInfluenceRadiusMeters = 0.0;
 	float CompositionStrength = 0.0f;
 	uint64 LocalSeed = 0;
 };
