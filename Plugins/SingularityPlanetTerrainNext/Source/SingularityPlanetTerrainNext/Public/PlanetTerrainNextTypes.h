@@ -38,6 +38,14 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextDescriptor
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
 	double HeightBoundMeters = 0.0;
 
+	/** Stage A geology foundation. Disabled preserves the legacy height sampler exactly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Geology")
+	bool bEnableGeologicalBiomes = false;
+
+	/** 0=MixedSurface, 1=YoungMare, 2=AncientHighland. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Geology", meta = (ClampMin = "0", ClampMax = "2"))
+	int32 GeologyPreset = 0;
+
 	/** Cells along one edge of each cube face. R1 static shell only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 CellsPerEdge = 16;

@@ -1,0 +1,324 @@
+#include "PlanetTerrainNextGeology.h"
+
+#include "PlanetTerrainNextCoordinates.h"
+
+namespace
+{
+constexpr uint64 GoldenGamma = 0x9E3779B97F4A7C15ull;
+
+FORCEINLINE uint64 Mix64(uint64 Z)
+{
+	Z = (Z ^ (Z >> 30)) * 0xBF58476D1CE4E5B9ull;
+	Z = (Z ^ (Z >> 27)) * 0x94D049BB133111EBull;
+	return Z ^ (Z >> 31);
+}
+
+FORCEINLINE uint64 HashStep(uint64 State, uint64 Value)
+{
+	return Mix64(State ^ (Value + GoldenGamma + (State << 6) + (State >> 2)));
+}
+
+struct FSplitMixRng
+{
+	uint64 State = 0;
+
+	double Next01()
+	{
+		State += GoldenGamma;
+		return static_cast<double>(Mix64(State) >> 11) * (1.0 / 9007199254740992.0);
+	}
+};
+
+FORCEINLINE double SmoothStep(double T)
+{
+	T = FMath::Clamp(T, 0.0, 1.0);
+	return T * T * (3.0 - 2.0 * T);
+}
+
+FORCEINLINE double AngleBetweenUnit(const FVector3d& A, const FVector3d& B)
+{
+	return FMath::Atan2(FVector3d::CrossProduct(A, B).Length(), FVector3d::DotProduct(A, B));
+}
+
+FORCEINLINE uint64 DoubleBits(double Value)
+{
+	uint64 Bits = 0;
+	FMemory::Memcpy(&Bits, &Value, sizeof(Bits));
+	return Bits;
+}
+} // namespace
+
+FPlanetTerrainNextGeologySettings FPlanetTerrainNextGeologySettings::FromDescriptor(
+	const FPlanetTerrainNextDescriptor& Descriptor)
+{
+	FPlanetTerrainNextGeologySettings Settings;
+	Settings.bEnableGeologicalBiomes = Descriptor.bEnableGeologicalBiomes;
+	Settings.Preset = static_cast<EPlanetTerrainNextGeologyPreset>(FMath::Clamp(Descriptor.GeologyPreset, 0, 2));
+	return Settings;
+}
+
+uint64 FPlanetTerrainNextGeologySettings::GetStableHash() const
+{
+	uint64 Hash = HashStep(0x47454F4Cull, Version);
+	Hash = HashStep(Hash, bEnableGeologicalBiomes ? 1ull : 0ull);
+	Hash = HashStep(Hash, static_cast<uint64>(Preset));
+	Hash = HashStep(Hash, static_cast<uint64>(BasinCount));
+	Hash = HashStep(Hash, static_cast<uint64>(ImpactCount));
+	Hash = HashStep(Hash, DoubleBits(OldestAgeMyrBP));
+	return HashStep(Hash, DoubleBits(YoungestAgeMyrBP));
+}
+
+void FPlanetTerrainNextSurfaceSample::NormalizeWeights()
+{
+	HighlandWeight = FMath::Max(0.0, HighlandWeight);
+	MareWeight = FMath::Max(0.0, MareWeight);
+	EjectaWeight = FMath::Max(0.0, EjectaWeight);
+	ImpactMeltWeight = FMath::Max(0.0, ImpactMeltWeight);
+	const double Sum = HighlandWeight + MareWeight + EjectaWeight + ImpactMeltWeight;
+	if (Sum > SMALL_NUMBER)
+	{
+		const double Inv = 1.0 / Sum;
+		HighlandWeight *= Inv;
+		MareWeight *= Inv;
+		EjectaWeight *= Inv;
+		ImpactMeltWeight *= Inv;
+	}
+	else
+	{
+		HighlandWeight = 1.0;
+		MareWeight = EjectaWeight = ImpactMeltWeight = 0.0;
+	}
+}
+
+namespace PlanetTerrainNextGeology
+{
+double GreatCircleDistanceMeters(const FVector3d& AUnit, const FVector3d& BUnit, double RadiusMeters)
+{
+	const FVector3d A = AUnit.GetSafeNormal();
+	const FVector3d B = BUnit.GetSafeNormal();
+	return FMath::Max(0.0, RadiusMeters) * AngleBetweenUnit(A, B);
+}
+
+void BuildTangentFrame(const FVector3d& CenterUnit, FVector3d& OutEast, FVector3d& OutNorth)
+{
+	const FVector3d Center = CenterUnit.GetSafeNormal();
+	const FVector3d Reference = FMath::Abs(Center.Z) < 0.9 ? FVector3d::UnitZ() : FVector3d::UnitX();
+	OutEast = FVector3d::CrossProduct(Reference, Center).GetSafeNormal();
+	if (OutEast.IsNearlyZero())
+	{
+		OutEast = FVector3d::CrossProduct(FVector3d::UnitY(), Center).GetSafeNormal();
+	}
+	OutNorth = FVector3d::CrossProduct(Center, OutEast).GetSafeNormal();
+}
+
+double WrappedAngleRadians(double A, double B)
+{
+	return FMath::Atan2(FMath::Sin(A - B), FMath::Cos(A - B));
+}
+} // namespace PlanetTerrainNextGeology
+
+FPlanetTerrainNextGeologyModel::FPlanetTerrainNextGeologyModel(
+	const FPlanetTerrainNextDescriptor& Descriptor)
+	: Settings(FPlanetTerrainNextGeologySettings::FromDescriptor(Descriptor))
+	, RadiusMeters(FMath::Max(Descriptor.RadiusMeters, 1000.0))
+{
+	uint64 RadiusBits = 0;
+	FMemory::Memcpy(&RadiusBits, &RadiusMeters, sizeof(RadiusBits));
+	IdentityHash = HashStep(HashStep(HashStep(0x47454F4D4F44454Cull, static_cast<uint64>(Descriptor.PlanetId)), static_cast<uint64>(Descriptor.Seed)), static_cast<uint64>(Descriptor.GeneratorVersion));
+	IdentityHash = HashStep(IdentityHash, RadiusBits);
+	IdentityHash = HashStep(IdentityHash, Settings.GetStableHash());
+
+	SpatialBins.SetNum(6 * SpatialBinsPerFace * SpatialBinsPerFace);
+	GenerateEvents(Descriptor);
+	for (int32 Index = 0; Index < Events.Num(); ++Index)
+	{
+		AddEventToSpatialIndex(Index);
+	}
+}
+
+void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDescriptor& Descriptor)
+{
+	Events.Reset();
+	FSplitMixRng Rng{HashStep(static_cast<uint64>(Descriptor.Seed), 0x4556454E5453ull)};
+	auto RandomDirection = [&Rng]()
+	{
+		const double Z = Rng.Next01() * 2.0 - 1.0;
+		const double Phi = Rng.Next01() * 2.0 * PI;
+		const double S = FMath::Sqrt(FMath::Max(0.0, 1.0 - Z * Z));
+		return FVector3d(S * FMath::Cos(Phi), S * FMath::Sin(Phi), Z);
+	};
+
+	uint32 EventId = 0;
+	for (int32 Index = 0; Index < Settings.BasinCount; ++Index)
+	{
+		FPlanetTerrainNextGeologyEvent& Event = Events.AddDefaulted_GetRef();
+		Event.Id = EventId++;
+		Event.Type = EPlanetTerrainNextGeologyEventType::AncientBasin;
+		Event.CenterUnit = RandomDirection();
+		Event.RadiusMeters = Index == 0 ? 550000.0 : FMath::Lerp(250000.0, 450000.0, Rng.Next01());
+		Event.AgeMyrBP = FMath::Lerp(3200.0, Settings.OldestAgeMyrBP, Rng.Next01());
+		Event.ReliefMeters = -FMath::Min(0.008 * Event.RadiusMeters, 4500.0);
+		Event.RimMeters = -Event.ReliefMeters * 0.15;
+		Event.InfluenceRadiusMeters = Event.RadiusMeters * 1.6;
+		Event.CompositionStrength = 0.65f;
+		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
+	}
+
+	for (int32 Index = 0; Index < Settings.ImpactCount; ++Index)
+	{
+		FPlanetTerrainNextGeologyEvent& Event = Events.AddDefaulted_GetRef();
+		Event.Id = EventId++;
+		Event.Type = EPlanetTerrainNextGeologyEventType::Impact;
+		Event.CenterUnit = RandomDirection();
+		const double Radius = FMath::Exp(FMath::Lerp(FMath::Loge(6000.0), FMath::Loge(120000.0), Rng.Next01()));
+		Event.RadiusMeters = Radius;
+		Event.AgeMyrBP = FMath::Lerp(Settings.YoungestAgeMyrBP, Settings.OldestAgeMyrBP, Rng.Next01());
+		Event.ReliefMeters = FMath::Min(Radius * FMath::Lerp(0.03, 0.12, Rng.Next01()), 4000.0);
+		Event.RimMeters = Event.ReliefMeters * 0.3;
+		Event.InfluenceRadiusMeters = Radius * 1.6;
+		Event.CompositionStrength = static_cast<float>(FMath::Lerp(0.2, 0.8, Rng.Next01()));
+		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
+	}
+
+	Events.Sort([](const FPlanetTerrainNextGeologyEvent& A, const FPlanetTerrainNextGeologyEvent& B)
+	{
+		return A.AgeMyrBP > B.AgeMyrBP;
+	});
+	IdentityHash = HashStep(IdentityHash, static_cast<uint64>(Events.Num()));
+	for (const FPlanetTerrainNextGeologyEvent& Event : Events)
+	{
+		IdentityHash = HashStep(IdentityHash, Event.Id);
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RadiusMeters));
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.AgeMyrBP));
+		IdentityHash = HashStep(IdentityHash, Event.LocalSeed);
+	}
+}
+
+void FPlanetTerrainNextGeologyModel::AddEventToSpatialIndex(int32 EventIndex)
+{
+	if (!Events.IsValidIndex(EventIndex))
+	{
+		return;
+	}
+	const FPlanetTerrainNextGeologyEvent& Event = Events[EventIndex];
+	int32 Face = 0;
+	double U = 0.5;
+	double V = 0.5;
+	PlanetTerrainNext::DirectionToFaceUV(Event.CenterUnit, Face, U, V);
+	const int32 X = FMath::Clamp(FMath::FloorToInt(U * SpatialBinsPerFace), 0, SpatialBinsPerFace - 1);
+	const int32 Y = FMath::Clamp(FMath::FloorToInt(V * SpatialBinsPerFace), 0, SpatialBinsPerFace - 1);
+	const int32 RadiusBins = Event.InfluenceRadiusMeters > RadiusMeters * 0.25 ? SpatialBinsPerFace : 1;
+	for (int32 Oy = -RadiusBins; Oy <= RadiusBins; ++Oy)
+	{
+		for (int32 Ox = -RadiusBins; Ox <= RadiusBins; ++Ox)
+		{
+			const int32 BX = X + Ox;
+			const int32 BY = Y + Oy;
+			if (BX < 0 || BX >= SpatialBinsPerFace || BY < 0 || BY >= SpatialBinsPerFace)
+			{
+				continue;
+			}
+			SpatialBins[(Face * SpatialBinsPerFace + BY) * SpatialBinsPerFace + BX].Add(EventIndex);
+		}
+	}
+}
+
+void FPlanetTerrainNextGeologyModel::GatherCandidateIndices(
+	const FVector3d& UnitDirection,
+	TArray<int32, TInlineAllocator<64>>& OutIndices) const
+{
+	OutIndices.Reset();
+	if (Events.Num() == 0)
+	{
+		return;
+	}
+	const FVector3d Direction = UnitDirection.GetSafeNormal();
+	int32 Face = 0;
+	double U = 0.5;
+	double V = 0.5;
+	PlanetTerrainNext::DirectionToFaceUV(Direction, Face, U, V);
+	const int32 X = FMath::Clamp(FMath::FloorToInt(U * SpatialBinsPerFace), 0, SpatialBinsPerFace - 1);
+	const int32 Y = FMath::Clamp(FMath::FloorToInt(V * SpatialBinsPerFace), 0, SpatialBinsPerFace - 1);
+	TArray<bool, TInlineAllocator<64>> Seen;
+	Seen.Init(false, Events.Num());
+	const bool bNearCubeEdge = U < 0.08 || U > 0.92 || V < 0.08 || V > 0.92;
+	if (bNearCubeEdge)
+	{
+		for (int32 Index = 0; Index < Events.Num(); ++Index)
+		{
+			Seen[Index] = true;
+			OutIndices.Add(Index);
+		}
+		return;
+	}
+	for (int32 Oy = -1; Oy <= 1; ++Oy)
+	{
+		for (int32 Ox = -1; Ox <= 1; ++Ox)
+		{
+			const int32 BX = X + Ox;
+			const int32 BY = Y + Oy;
+			if (BX < 0 || BX >= SpatialBinsPerFace || BY < 0 || BY >= SpatialBinsPerFace)
+			{
+				continue;
+			}
+			const TArray<int32>& Bin = SpatialBins[(Face * SpatialBinsPerFace + BY) * SpatialBinsPerFace + BX];
+			for (int32 EventIndex : Bin)
+			{
+				if (Seen.IsValidIndex(EventIndex) && !Seen[EventIndex])
+				{
+					Seen[EventIndex] = true;
+					OutIndices.Add(EventIndex);
+				}
+			}
+		}
+	}
+}
+
+int32 FPlanetTerrainNextGeologyModel::CountCandidates(const FVector3d& UnitDirection) const
+{
+	TArray<int32, TInlineAllocator<64>> Candidates;
+	GatherCandidateIndices(UnitDirection, Candidates);
+	return Candidates.Num();
+}
+
+FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
+	const FVector3d& UnitDirection,
+	double SampleFootprintMeters) const
+{
+	const FVector3d Direction = UnitDirection.GetSafeNormal();
+	FPlanetTerrainNextSurfaceSample Sample;
+	TArray<int32, TInlineAllocator<64>> Candidates;
+	GatherCandidateIndices(Direction, Candidates);
+	const double Footprint = FMath::Max(0.0, SampleFootprintMeters);
+	for (int32 EventIndex : Candidates)
+	{
+		const FPlanetTerrainNextGeologyEvent& Event = Events[EventIndex];
+		const double Distance = PlanetTerrainNextGeology::GreatCircleDistanceMeters(Direction, Event.CenterUnit, RadiusMeters);
+		const double Feather = FMath::Max(Event.InfluenceRadiusMeters * 0.15, Footprint);
+		const double Influence = 1.0 - SmoothStep((Distance - Event.InfluenceRadiusMeters + Feather) / (2.0 * Feather));
+		if (Influence <= 0.0)
+		{
+			continue;
+		}
+		const double Fresh = FMath::Exp(-Event.AgeMyrBP / 500.0);
+		Sample.ExposureAgeMyr = FMath::Min(Sample.ExposureAgeMyr, Event.AgeMyrBP);
+		Sample.Freshness = FMath::Max(Sample.Freshness, Fresh * Influence);
+		if (Event.Type == EPlanetTerrainNextGeologyEventType::AncientBasin
+			|| Event.Type == EPlanetTerrainNextGeologyEventType::BasaltEpisode)
+		{
+			const double Deposit = Influence * Event.CompositionStrength;
+			Sample.MareWeight = Sample.MareWeight * (1.0 - Deposit) + Deposit;
+			Sample.HighlandWeight *= (1.0 - Deposit);
+		}
+		else
+		{
+			const double Deposit = Influence * Event.CompositionStrength * 0.5;
+			Sample.EjectaWeight = Sample.EjectaWeight * (1.0 - Deposit) + Deposit;
+			Sample.ImpactMeltWeight = FMath::Max(Sample.ImpactMeltWeight, Deposit * Fresh);
+			Sample.RayIntensity = FMath::Max(Sample.RayIntensity, Deposit * Fresh);
+		}
+	}
+	Sample.NormalizeWeights();
+	Sample.MaterialId = Sample.MareWeight > 0.5 ? 1 : (Sample.EjectaWeight > 0.35 ? 2 : 0);
+	return Sample;
+}

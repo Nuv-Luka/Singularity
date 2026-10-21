@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "PlanetTerrainNextGeology.h"
 #include "PlanetTerrainNextTypes.h"
 
 /** Height split by layer, in meters relative to the base radius. */
@@ -42,6 +43,7 @@ public:
 
 	double HeightAt(const FVector3d& UnitDirection, double MinResolvedWavelengthM) const;
 	FPlanetTerrainNextHeightComponents EvaluateComponents(const FVector3d& UnitDirection, double MinResolvedWavelengthM) const;
+	FPlanetTerrainNextSurfaceSample SampleGeology(const FVector3d& UnitDirection, double SampleFootprintMeters) const;
 
 	/** Bowl + rim of one crater, band-limited. Used by tests to track a single crater across LODs. */
 	double CraterContribution(int32 CraterIndex, const FVector3d& UnitDirection, double MinResolvedWavelengthM) const;
@@ -58,6 +60,7 @@ public:
 	double GetMaxHeightMeters() const { return MaxHeightM; }
 	double GetHeightBoundMeters() const { return FMath::Max(-MinHeightM, MaxHeightM); }
 	const TArray<FPlanetTerrainNextCrater>& GetCraters() const { return Craters; }
+	const FPlanetTerrainNextGeologyModel& GetGeologyModel() const { return *GeologyModel; }
 
 	/** Seed + generator version + radius. Cache identity must include this. */
 	uint64 GetIdentityHash() const { return IdentityHash; }
@@ -80,6 +83,7 @@ private:
 	double RadiusM = 0.0;
 	uint64 Seed = 0;
 	uint64 IdentityHash = 0;
+	TSharedPtr<FPlanetTerrainNextGeologyModel, ESPMode::ThreadSafe> GeologyModel;
 	TArray<FOctave> MacroOctaves;
 	TArray<FOctave> RoughOctaves;
 	TArray<FPlanetTerrainNextCrater> Craters;

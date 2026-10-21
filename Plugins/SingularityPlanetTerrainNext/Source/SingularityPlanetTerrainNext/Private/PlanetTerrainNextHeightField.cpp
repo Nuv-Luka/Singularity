@@ -108,6 +108,8 @@ FPlanetTerrainNextHeightField::FPlanetTerrainNextHeightField(const FPlanetTerrai
 	uint64 RadiusBits = 0;
 	FMemory::Memcpy(&RadiusBits, &RadiusM, sizeof(RadiusBits));
 	IdentityHash = HashStep(Seed, RadiusBits);
+	GeologyModel = MakeShared<FPlanetTerrainNextGeologyModel, ESPMode::ThreadSafe>(Descriptor);
+	IdentityHash = HashStep(IdentityHash, GeologyModel->GetIdentityHash());
 
 	FSplitMixRng Rng{HashStep(Seed, 0x0FF5E7ull)};
 	auto MakeOctave = [this, &Rng](double Wavelength, double Amplitude, uint64 Layer, int32 Index)
@@ -262,6 +264,15 @@ FPlanetTerrainNextHeightComponents FPlanetTerrainNextHeightField::EvaluateCompon
 double FPlanetTerrainNextHeightField::HeightAt(const FVector3d& UnitDirection, double MinResolvedWavelengthM) const
 {
 	return EvaluateComponents(UnitDirection, MinResolvedWavelengthM).Total();
+}
+
+FPlanetTerrainNextSurfaceSample FPlanetTerrainNextHeightField::SampleGeology(
+	const FVector3d& UnitDirection,
+	double SampleFootprintMeters) const
+{
+	return GeologyModel.IsValid()
+		? GeologyModel->SampleSurface(UnitDirection, SampleFootprintMeters)
+		: FPlanetTerrainNextSurfaceSample();
 }
 
 double FPlanetTerrainNextHeightField::CraterContribution(int32 CraterIndex, const FVector3d& UnitDirection, double MinResolvedWavelengthM) const
