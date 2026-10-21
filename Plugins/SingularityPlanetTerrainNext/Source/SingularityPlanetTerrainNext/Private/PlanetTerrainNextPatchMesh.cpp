@@ -280,7 +280,8 @@ void BuildFromTile(
 	const FPlanetTerrainNextHeightField& HeightField,
 	const FPlanetTerrainNextHeightTile& Tile,
 	double SkirtDepthM,
-	FPlanetTerrainNextPatchData& Out)
+	FPlanetTerrainNextPatchData& Out,
+	const FPlanetTerrainNextEdgeAdjacency* EdgeAdjacency)
 {
 	const FPlanetTerrainNextNodeId Id = Tile.Id.Node;
 	const double Radius = HeightField.GetRadiusMeters();
@@ -374,6 +375,8 @@ void BuildFromTile(
 	Out.UV2.SetNumUninitialized(VertexCount);
 	Out.VertexColors.SetNumUninitialized(VertexCount);
 	Out.MaxAbsCoarseDeltaCm = 0.0;
+	TArray<FVector3d> RenderedGrid;
+	RenderedGrid.SetNumUninitialized(GridVertexCount);
 
 	auto EmitVertex = [&](int32 Index, const FVector3d& Fine, const FVector3d& Coarse, const FVector3d& FineN, const FVector3d& CoarseN, const FVector3d& Tangent, const FVector2D& UV)
 	{
@@ -429,11 +432,17 @@ void BuildFromTile(
 			// row is a half blend. Interior vertices retain their fine detail.
 			// This makes the edge watertight even while legacy morph/WPO is off.
 			const int32 EdgeDistance = FMath::Min(FMath::Min(I, GridN - I), FMath::Min(J, GridN - J));
-			const double EdgeBlend = Id.Level > 0
+			const bool bLegacyFallbackEdge = !EdgeAdjacency
+				|| (I == 0 && !EdgeAdjacency[2].bHasNeighbor)
+				|| (I == GridN && !EdgeAdjacency[3].bHasNeighbor)
+				|| (J == 0 && !EdgeAdjacency[0].bHasNeighbor)
+				|| (J == GridN && !EdgeAdjacency[1].bHasNeighbor);
+			const double EdgeBlend = Id.Level > 0 && bLegacyFallbackEdge
 				? FMath::Clamp(1.0 - static_cast<double>(EdgeDistance) / 2.0, 0.0, 1.0)
 				: 0.0;
 			const FVector3d DisplayFine = FMath::Lerp(Fine, Coarse, EdgeBlend);
 			const FVector3d DisplayNormal = FMath::Lerp(FineN, CoarseN, EdgeBlend).GetSafeNormal();
+			RenderedGrid[GridIndex(I, J)] = DisplayFine;
 
 			EmitVertex(GridIndex(I, J), DisplayFine, Coarse, DisplayNormal, CoarseN, Tangent,
 				FVector2D(static_cast<double>(I) / GridN, static_cast<double>(J) / GridN));
@@ -449,7 +458,10 @@ void BuildFromTile(
 			const int32 J = Top / Row;
 			const FVector3d Down = HaloDirs[HaloIndex(I, J)] * SkirtDepthM;
 			const int32 Bottom = GridVertexCount + Edge * Row + K;
-			const FVector3d Fine = FineHalo[HaloIndex(I, J)] - Down;
+			// Skirts originate from the final rendered edge position. Using FineHalo
+			// here leaves the skirt top offset from a constrained DisplayFine edge,
+			// producing a visible seam and a shadow-casting wall.
+			const FVector3d Fine = RenderedGrid[Top] - Down;
 			const FVector3d Coarse = CoarseHalo[HaloIndex(I, J)] - Down;
 			EmitVertex(Bottom, Fine, Coarse,
 				FVector3d(Out.Normals[Top]), FVector3d(Out.CoarseNormals[Top]),
@@ -466,6 +478,11 @@ void BuildFromTile(
 		Out.UV1[Index].Y /= Scale;
 		Out.UV2[Index].X /= Scale;
 		Out.UV2[Index].Y = 0.0f;
+	}
+
+	if (EdgeAdjacency)
+	{
+		ApplyNeighborEdgeStitching(HeightField, Out, EdgeAdjacency);
 	}
 }
 
@@ -538,6 +555,156 @@ void MeasureParentEdgeGaps(
 			OutMaxMidpointGapM = FMath::Max(OutMaxMidpointGapM, (CoarseWorld - ParentMid).Length());
 			OutMaxFineParentGapM = FMath::Max(OutMaxFineParentGapM, (FineWorld - ParentMid).Length());
 		}
+	}
+}
+
+void ApplyNeighborEdgeStitching(
+	const FPlanetTerrainNextHeightField& HeightField,
+	FPlanetTerrainNextPatchData& Patch,
+	const FPlanetTerrainNextEdgeAdjacency* EdgeAdjacency)
+{
+	if (!EdgeAdjacency || Patch.VerticesCm.Num() != VertexCount)
+	{
+		return;
+	}
+
+	const double Radius = HeightField.GetRadiusMeters();
+	TArray<FVector3d> Original;
+	Original.SetNumUninitialized(GridVertexCount);
+	for (int32 J = 0; J <= GridN; ++J)
+	{
+		for (int32 I = 0; I <= GridN; ++I)
+		{
+			Original[GridIndex(I, J)] = FVector3d(Patch.VerticesCm[GridIndex(I, J)]) / PlanetTerrainNext::CmPerMeter;
+		}
+	}
+
+	auto EdgeCoordinates = [](EPlanetTerrainNextPatchEdge Edge, int32 K, int32& OutI, int32& OutJ)
+	{
+		switch (Edge)
+		{
+		case EPlanetTerrainNextPatchEdge::Bottom: OutI = K; OutJ = 0; break;
+		case EPlanetTerrainNextPatchEdge::Top: OutI = K; OutJ = GridN; break;
+		case EPlanetTerrainNextPatchEdge::Left: OutI = 0; OutJ = K; break;
+		default: OutI = GridN; OutJ = K; break;
+		}
+	};
+
+	for (int32 EdgeIndex = 0; EdgeIndex < 4; ++EdgeIndex)
+	{
+		const FPlanetTerrainNextEdgeAdjacency& Adjacency = EdgeAdjacency[EdgeIndex];
+		if (!Adjacency.bHasNeighbor || !Adjacency.bRequiresStitching)
+		{
+			continue;
+		}
+		const int32 NeighborLevel = static_cast<int32>(Adjacency.NeighborId.Level);
+		if (NeighborLevel > static_cast<int32>(Patch.Id.Level))
+		{
+			continue;
+		}
+
+		TArray<FVector3d> NeighborEdge;
+		NeighborEdge.SetNumUninitialized(Row);
+		for (int32 K = 0; K <= GridN; ++K)
+		{
+			int32 NI = 0;
+			int32 NJ = 0;
+			EdgeCoordinates(Adjacency.NeighborEdge, K, NI, NJ);
+			const FVector3d Dir = VertexDirection(Adjacency.NeighborId, NI, NJ);
+			const double H = HeightField.HeightAt(Dir, MinWavelengthMeters(Radius, NeighborLevel));
+			NeighborEdge[K] = Dir * (Radius + H);
+		}
+
+		for (int32 K = 0; K <= GridN; ++K)
+		{
+			int32 I = 0;
+			int32 J = 0;
+			EdgeCoordinates(static_cast<EPlanetTerrainNextPatchEdge>(EdgeIndex), K, I, J);
+			const FVector3d Dir = VertexDirection(Patch.Id, I, J);
+			double U = 0.0;
+			double V = 0.0;
+			if (!PlanetTerrainNext::TryUnprojectFace(Dir, Adjacency.NeighborId.Face, U, V))
+			{
+				continue;
+			}
+			double T = (Adjacency.NeighborEdge == EPlanetTerrainNextPatchEdge::Bottom
+				|| Adjacency.NeighborEdge == EPlanetTerrainNextPatchEdge::Top) ? U : V;
+			if (Adjacency.bReversed)
+			{
+				T = 1.0 - T;
+			}
+			const double Sample = FMath::Clamp(T, 0.0, 1.0) * GridN;
+			const int32 K0 = FMath::Clamp(FMath::FloorToInt(Sample), 0, GridN - 1);
+			const int32 K1 = FMath::Min(K0 + 1, GridN);
+			const FVector3d Target = FMath::Lerp(NeighborEdge[K0], NeighborEdge[K1], Sample - K0);
+			const int32 Index = GridIndex(I, J);
+			const int32 EdgeDistance = FMath::Min(FMath::Min(I, GridN - I), FMath::Min(J, GridN - J));
+			const double Alpha = EdgeDistance == 0 ? 1.0 : (EdgeDistance == 1 ? 0.5 : 0.0);
+			const FVector3d Constrained = FMath::Lerp(Original[Index], Target - Patch.OriginM, Alpha);
+			Patch.VerticesCm[Index] = FVector(Constrained * PlanetTerrainNext::CmPerMeter);
+			if (EdgeDistance == 0)
+			{
+				Patch.CoarseVerticesCm[Index] = Patch.VerticesCm[Index];
+			}
+		}
+	}
+
+	for (int32 J = 0; J <= GridN; ++J)
+	{
+		for (int32 I = 0; I <= GridN; ++I)
+		{
+			const int32 Index = GridIndex(I, J);
+			const int32 IL = FMath::Max(I - 1, 0);
+			const int32 IR = FMath::Min(I + 1, GridN);
+			const int32 JB = FMath::Max(J - 1, 0);
+			const int32 JT = FMath::Min(J + 1, GridN);
+			const FVector3d DU = FVector3d(Patch.VerticesCm[GridIndex(IR, J)] - Patch.VerticesCm[GridIndex(IL, J)]);
+			const FVector3d DV = FVector3d(Patch.VerticesCm[GridIndex(I, JT)] - Patch.VerticesCm[GridIndex(I, JB)]);
+			FVector3d Normal = FVector3d::CrossProduct(DU, DV).GetSafeNormal();
+			const FVector3d Fallback = PlanetTerrainNext::FacePoint(Patch.Id.Face,
+				Patch.Id.U0() + (Patch.Id.U1() - Patch.Id.U0()) * static_cast<double>(I) / GridN,
+				Patch.Id.V0() + (Patch.Id.V1() - Patch.Id.V0()) * static_cast<double>(J) / GridN);
+			if (Normal.IsNearlyZero() || FVector3d::DotProduct(Normal, Fallback) < 0.0)
+			{
+				Normal = Fallback;
+			}
+			Patch.Normals[Index] = FVector(Normal);
+			Patch.Tangents[Index] = FVector(DU.GetSafeNormal());
+		}
+	}
+
+	for (int32 Edge = 0; Edge < 4; ++Edge)
+	{
+		for (int32 K = 0; K <= GridN; ++K)
+		{
+			const int32 Top = EdgeGridIndex(Edge, K);
+			const int32 I = Top % Row;
+			const int32 J = Top / Row;
+			const FVector3d Down = PlanetTerrainNext::FacePoint(Patch.Id.Face,
+				Patch.Id.U0() + (Patch.Id.U1() - Patch.Id.U0()) * static_cast<double>(I) / GridN,
+				Patch.Id.V0() + (Patch.Id.V1() - Patch.Id.V0()) * static_cast<double>(J) / GridN) * Patch.SkirtDepthM;
+			const int32 Bottom = GridVertexCount + Edge * Row + K;
+			Patch.VerticesCm[Bottom] = Patch.VerticesCm[Top] - FVector(Down * PlanetTerrainNext::CmPerMeter);
+			Patch.CoarseVerticesCm[Bottom] = Patch.CoarseVerticesCm[Top] - FVector(Down * PlanetTerrainNext::CmPerMeter);
+			Patch.Normals[Bottom] = Patch.Normals[Top];
+			Patch.CoarseNormals[Bottom] = Patch.CoarseNormals[Top];
+			Patch.Tangents[Bottom] = Patch.Tangents[Top];
+		}
+	}
+
+	Patch.MaxAbsCoarseDeltaCm = 0.0;
+	for (int32 Index = 0; Index < Patch.VerticesCm.Num(); ++Index)
+	{
+		Patch.MaxAbsCoarseDeltaCm = FMath::Max(
+			Patch.MaxAbsCoarseDeltaCm,
+			static_cast<double>((Patch.CoarseVerticesCm[Index] - Patch.VerticesCm[Index]).GetAbsMax()));
+	}
+	const float Scale = static_cast<float>(FMath::Max(Patch.MaxAbsCoarseDeltaCm, 1.0));
+	for (int32 Index = 0; Index < Patch.VerticesCm.Num(); ++Index)
+	{
+		const FVector Delta = Patch.CoarseVerticesCm[Index] - Patch.VerticesCm[Index];
+		Patch.UV1[Index] = FVector2D(Delta.X / Scale, Delta.Y / Scale);
+		Patch.UV2[Index] = FVector2D(Delta.Z / Scale, 0.0f);
 	}
 }
 }

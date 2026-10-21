@@ -226,9 +226,9 @@ private:
 	bool ShouldRecreateSection(const FSlot& Slot, bool bAllowForceFresh, int32 VertexCount, int32 IndexCount) const;
 	void TickDiagnostic(float DeltaSeconds);
 	void ApplySuspendedProxyVisibility(bool bShowProxy);
-	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds);
+	void ApplyDrawSet(const TArray<FPlanetTerrainNextDrawItem>& DrawSet, float DeltaSeconds, const FPlanetTerrainNextView* View = nullptr);
 	void ApplyDrawSetExclusive(TSet<FPlanetTerrainNextNodeId>& Next);
-	void ApplyDrawSetDithered(const TSet<FPlanetTerrainNextNodeId>& Desired, float DeltaSeconds);
+	void ApplyDrawSetDithered(const TSet<FPlanetTerrainNextNodeId>& Desired, float DeltaSeconds, const FPlanetTerrainNextView* View);
 	void FlushPendingPhysicalReleases();
 	void SyncVisibilityToRenderSet(const TSet<FPlanetTerrainNextNodeId>& Render);
 	void ReconcileShadowState(FSlot& Slot, bool bInFade, bool bDominant);

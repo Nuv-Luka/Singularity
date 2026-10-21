@@ -40,6 +40,24 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextPatchData
 	double MaxAbsCoarseDeltaCm = 0.0;
 };
 
+enum class EPlanetTerrainNextPatchEdge : uint8
+{
+	Bottom = 0,
+	Top = 1,
+	Left = 2,
+	Right = 3
+};
+
+/** Neighbor relationship used to constrain only the edge that meets a coarser patch. */
+struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextEdgeAdjacency
+{
+	bool bHasNeighbor = false;
+	bool bRequiresStitching = false;
+	FPlanetTerrainNextNodeId NeighborId;
+	EPlanetTerrainNextPatchEdge NeighborEdge = EPlanetTerrainNextPatchEdge::Bottom;
+	bool bReversed = false;
+};
+
 namespace PlanetTerrainNextPatch
 {
 inline constexpr int32 GridN = 16;
@@ -91,7 +109,14 @@ SINGULARITYPLANETTERRAINNEXT_API void BuildFromTile(
 	const FPlanetTerrainNextHeightField& HeightField,
 	const FPlanetTerrainNextHeightTile& Tile,
 	double SkirtDepthM,
-	FPlanetTerrainNextPatchData& Out);
+	FPlanetTerrainNextPatchData& Out,
+	const FPlanetTerrainNextEdgeAdjacency* EdgeAdjacency = nullptr);
+
+/** Apply a local fine-to-coarse edge constraint and refresh affected normals, tangents and skirts. */
+SINGULARITYPLANETTERRAINNEXT_API void ApplyNeighborEdgeStitching(
+	const FPlanetTerrainNextHeightField& HeightField,
+	FPlanetTerrainNextPatchData& Patch,
+	const FPlanetTerrainNextEdgeAdjacency* EdgeAdjacency);
 
 /**
  * Max |Fine - Coarse| and edge T-junction residual against the parent mesh edge.
