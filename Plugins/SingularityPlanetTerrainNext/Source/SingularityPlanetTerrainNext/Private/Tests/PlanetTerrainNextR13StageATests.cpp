@@ -232,4 +232,38 @@ bool FPlanetTerrainNextR13GeologyBakeBudgetTest::RunTest(const FString& Paramete
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPlanetTerrainNextR13GeologyMorphologyTest,
+	"Singularity.PlanetTerrainNext.R13.StageC.Morphology",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetTerrainNextR13GeologyMorphologyTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	const FPlanetTerrainNextGeologyModel Model(StageBDescriptor());
+	const FPlanetTerrainNextGeologyEvent* LargestImpact = nullptr;
+	for (const FPlanetTerrainNextGeologyEvent& Event : Model.GetEvents())
+	{
+		if (Event.Type == EPlanetTerrainNextGeologyEventType::Impact
+			&& (!LargestImpact || Event.RadiusMeters > LargestImpact->RadiusMeters))
+		{
+			LargestImpact = &Event;
+		}
+	}
+	TestTrue(TEXT("catalog contains impact morphology"), LargestImpact != nullptr);
+	if (!LargestImpact)
+	{
+		return false;
+	}
+
+	const FPlanetTerrainNextSurfaceSample Center = Model.SampleSurface(LargestImpact->CenterUnit, 100.0);
+	const FPlanetTerrainNextSurfaceSample Rim = Model.SampleSurface(
+		(LargestImpact->CenterUnit + FVector3d::UnitX() * 0.002).GetSafeNormal(), 100.0);
+	TestTrue(TEXT("impact sample is finite"), FMath::IsFinite(Center.HeightOffsetM) && FMath::IsFinite(Rim.HeightOffsetM));
+	TestTrue(TEXT("impact exposes age field"), Center.ExposureAgeMyr >= 0.0 && Center.ExposureAgeMyr <= 4200.0);
+	TestTrue(TEXT("impact morphology changes height"), FMath::Abs(Center.HeightOffsetM - Rim.HeightOffsetM) > 0.01);
+	TestTrue(TEXT("impact freshness is bounded"), Center.Freshness >= 0.0 && Center.Freshness <= 1.0);
+	return true;
+}
+
 #endif

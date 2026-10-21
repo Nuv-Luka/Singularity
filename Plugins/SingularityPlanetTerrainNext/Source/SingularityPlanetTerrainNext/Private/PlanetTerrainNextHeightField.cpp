@@ -198,6 +198,8 @@ FPlanetTerrainNextHeightField::FPlanetTerrainNextHeightField(const FPlanetTerrai
 		{
 			GeologyBound += FMath::Abs(Event.ReliefMeters) + FMath::Abs(Event.RimMeters);
 			GeologyBound += FMath::Abs(Event.FillHeightMeters) * 0.25;
+			GeologyBound += FMath::Abs(Event.BowlDepthMeters) + FMath::Abs(Event.RimHeightMeters);
+			GeologyBound += FMath::Abs(Event.CentralPeakMeters);
 		}
 		MinHeightM -= GeologyBound;
 		MaxHeightM += GeologyBound;

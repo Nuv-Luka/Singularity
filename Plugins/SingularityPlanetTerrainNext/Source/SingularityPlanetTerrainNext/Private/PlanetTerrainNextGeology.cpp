@@ -79,6 +79,13 @@ FORCEINLINE double EventEnvelope(
 		+ 0.025 * FMath::Sin(FVector3d::DotProduct(Direction, AxisB) * 23.0 - 0.7);
 	return Base * FMath::Clamp(Warp, 0.82, 1.18);
 }
+
+FORCEINLINE double FeatureBand(double WavelengthMeters, double SampleFootprintMeters)
+{
+	const double Footprint = FMath::Max(SampleFootprintMeters, 1.0);
+	const double T = FMath::Clamp(WavelengthMeters / Footprint - 1.0, 0.0, 1.0);
+	return T * T * (3.0 - 2.0 * T);
+}
 } // namespace
 
 FPlanetTerrainNextGeologySettings FPlanetTerrainNextGeologySettings::FromDescriptor(
@@ -195,6 +202,9 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.InfluenceRadiusMeters = Event.RadiusMeters * 1.6;
 		Event.FillHeightMeters = Event.ReliefMeters * 0.22;
 		Event.ShorelineWidthMeters = FMath::Max(12000.0, Event.RadiusMeters * 0.08);
+		Event.BowlDepthMeters = FMath::Abs(Event.ReliefMeters);
+		Event.RimHeightMeters = Event.RimMeters;
+		Event.CentralPeakMeters = 0.0;
 		Event.CompositionStrength = 0.65f;
 		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
 
@@ -216,6 +226,9 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 			Flow.InfluenceRadiusMeters = Flow.RadiusMeters * 1.35;
 			Flow.FillHeightMeters = Event.FillHeightMeters + FMath::Lerp(-80.0, 80.0, Rng.Next01());
 			Flow.ShorelineWidthMeters = FMath::Max(8000.0, Flow.RadiusMeters * 0.1);
+			Flow.BowlDepthMeters = 0.0;
+			Flow.RimHeightMeters = 0.0;
+			Flow.CentralPeakMeters = 0.0;
 			Flow.CompositionStrength = static_cast<float>(FMath::Lerp(0.55, 0.9, Rng.Next01()));
 			Flow.LocalSeed = HashStep(Event.LocalSeed, static_cast<uint64>(Episode + 1));
 		}
@@ -235,6 +248,9 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.InfluenceRadiusMeters = Radius * 1.6;
 		Event.FillHeightMeters = 0.0;
 		Event.ShorelineWidthMeters = Radius * 0.1;
+		Event.BowlDepthMeters = Event.ReliefMeters;
+		Event.RimHeightMeters = Event.ReliefMeters * 0.3;
+		Event.CentralPeakMeters = Radius > 50000.0 ? Event.ReliefMeters * 0.18 : 0.0;
 		Event.CompositionStrength = static_cast<float>(FMath::Lerp(0.2, 0.8, Rng.Next01()));
 		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
 	}
@@ -251,6 +267,9 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.AgeMyrBP));
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.FillHeightMeters));
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.ShorelineWidthMeters));
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.BowlDepthMeters));
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RimHeightMeters));
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.CentralPeakMeters));
 		IdentityHash = HashStep(IdentityHash, Event.LocalSeed);
 	}
 }
@@ -397,6 +416,32 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 			Sample.EjectaWeight = Sample.EjectaWeight * (1.0 - Deposit) + Deposit;
 			Sample.ImpactMeltWeight = FMath::Max(Sample.ImpactMeltWeight, Deposit * Fresh);
 			Sample.RayIntensity = FMath::Max(Sample.RayIntensity, Deposit * Fresh);
+
+			if (Event.Type == EPlanetTerrainNextGeologyEventType::Impact)
+			{
+				const double DegradationLife = FMath::Max(80.0, 320.0 * FMath::Sqrt(Event.RadiusMeters / 10000.0));
+				const double Degradation = FMath::Exp(-Event.AgeMyrBP / DegradationLife);
+				const double Band = FeatureBand(2.0 * Event.RadiusMeters, Footprint);
+				const double T = Distance / FMath::Max(Event.RadiusMeters, 1.0);
+				double Morphology = 0.0;
+				if (T < 1.0)
+				{
+					const double BowlShape = FMath::Pow(FMath::Max(0.0, 1.0 - T * T), 1.25);
+					Morphology -= Event.BowlDepthMeters * Degradation * BowlShape * Band;
+				}
+				const double RimT = FMath::Abs(T - 1.0) / 0.18;
+				if (RimT < 1.0)
+				{
+					const double RimShape = FMath::Exp(-2.5 * RimT * RimT);
+					Morphology += Event.RimHeightMeters * Degradation * RimShape * Band;
+				}
+				if (Event.CentralPeakMeters > 0.0 && T < 0.24)
+				{
+					const double PeakShape = FMath::Exp(-18.0 * T * T);
+					Morphology += Event.CentralPeakMeters * Degradation * PeakShape * Band;
+				}
+				Sample.HeightOffsetM += Morphology * Influence;
+			}
 		}
 	}
 	Sample.NormalizeWeights();
