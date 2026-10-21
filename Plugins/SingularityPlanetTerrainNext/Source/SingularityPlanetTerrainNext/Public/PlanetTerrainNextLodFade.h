@@ -22,6 +22,12 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextLodFade
 	/** +1 split (parent→children), -1 merge (children→parent). */
 	int32 Direction = 1;
 	uint64 GenerationEpoch = 0;
+	/** Spatial fade anchor. Progress is derived from distance, never elapsed time. */
+	bool bSpatial = false;
+	double AnchorDistanceM = 0.0;
+	double DistanceSpanM = 1.0;
+	FVector3d LastCameraM = FVector3d::ZeroVector;
+	bool bHasCameraSample = false;
 };
 
 namespace PlanetTerrainNextLodFade
@@ -55,6 +61,19 @@ SINGULARITYPLANETTERRAINNEXT_API void BuildRenderSet(
 
 /** Advance Progress; completes when Progress hits 0 or 1. Returns true if group finished. */
 SINGULARITYPLANETTERRAINNEXT_API bool TickFade(FPlanetTerrainNextLodFade& Fade, float DeltaSeconds);
+
+/** Advance a fade from camera distance to the patch bound. Stationary cameras do not advance. */
+SINGULARITYPLANETTERRAINNEXT_API bool AdvanceSpatialFade(
+	FPlanetTerrainNextLodFade& Fade,
+	double DistanceToPatchM,
+	const FVector3d& CameraM,
+	bool bTeleport = false);
+
+/** Re-anchor a fade when the camera reverses direction while preserving coverage progress. */
+SINGULARITYPLANETTERRAINNEXT_API void ReverseSpatialFade(
+	FPlanetTerrainNextLodFade& Fade,
+	double DistanceToPatchM,
+	int32 NewDirection);
 
 /** Parent opacity role: 0. Child role: 1. */
 inline float RoleParent() { return 0.0f; }
