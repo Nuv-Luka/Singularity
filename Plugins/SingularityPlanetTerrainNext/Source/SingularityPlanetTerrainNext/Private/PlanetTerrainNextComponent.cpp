@@ -1242,6 +1242,7 @@ void UPlanetTerrainNextComponent::ReconcileShadowState(FSlot& Slot, bool bInFade
 
 void UPlanetTerrainNextComponent::ApplyLodFadeParams()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_ApplyLodFadeParams);
 	if (LodFades.Num() == 0)
 	{
 		return;
@@ -2193,6 +2194,7 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	FrameStats.Splits = TreeStats.Splits;
 	FrameStats.Merges = TreeStats.Merges;
 	FrameStats.BudgetBlocked = TreeStats.BudgetBlocked;
+	FrameStats.BalanceBlocked = TreeStats.BalanceBlocked;
 	FrameStats.Resident = Resident.Num();
 	FrameStats.Drawn = Drawn.Num();
 	FrameStats.Pending = FMath::Max(0, Pending.Num() - Built);
@@ -2442,7 +2444,7 @@ void UPlanetTerrainNextComponent::WritePerfSample()
 	{
 		const ANSICHAR Header[] =
 			"frame,scenario,delta_ms,update_ms,tree_ms,schedule_ms,mesh_build_ms,collision_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,"
-			"nodes,resident,drawn,pending,fades,visibility_changes,mesh_creates,mesh_updates,mesh_clears,mesh_rebuilds,"
+			"nodes,resident,drawn,pending,fades,visibility_changes,mesh_creates,mesh_updates,mesh_clears,mesh_rebuilds,balance_blocked,"
 			"cpu_morph_active,cpu_morph_uploads,cpu_morph_upload_ms,detail_ready,detail_pending,detail_baking,detail_uploads,"
 			"detail_bake_p95_ms,detail_upload_ms,tile_cache_hits,tile_cache_misses,tile_bakes,disk_hits,disk_misses,disk_writes,"
 			"gpu_resident,gpu_uploads,collision_resident,collision_desired,collision_cooked,coverage_ok\n";
@@ -2451,7 +2453,7 @@ void UPlanetTerrainNextComponent::WritePerfSample()
 	}
 
 	const FString Line = FString::Printf(
-		TEXT("%lld,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%d,%d,%d,%d,%.4f,%.4f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"),
+		TEXT("%lld,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%d,%d,%d,%d,%.4f,%.4f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"),
 		FrameCounter,
 		*Settings.PerfScenario.Replace(TEXT(","), TEXT("_")),
 		FrameStats.DeltaMs,
@@ -2473,6 +2475,7 @@ void UPlanetTerrainNextComponent::WritePerfSample()
 		FrameStats.MeshSectionUpdates,
 		FrameStats.MeshSectionClears,
 		FrameStats.MeshResourceRebuilds,
+		FrameStats.BalanceBlocked,
 		FrameStats.ActiveCpuMorphPatches,
 		FrameStats.CpuMorphUploads,
 		FrameStats.CpuMorphUploadMs,
@@ -2542,10 +2545,11 @@ void UPlanetTerrainNextComponent::PrintStats() const
 		0.0f,
 		FColor(210, 210, 230),
 		FString::Printf(
-			TEXT("TerrainNext perf | frame P50/P95/P99 %.2f/%.2f/%.2fms | visible patches %d | sections create/update/clear %d/%d/%d rebuilds %d | CPU morph active/uploads/ms %d/%d/%.2f | detail bakeP95/upload ms %.1f/%.1f"),
+			TEXT("TerrainNext perf | frame P50/P95/P99 %.2f/%.2f/%.2fms | visible patches %d | sections create/update/clear %d/%d/%d rebuilds %d | balance blocked %d | CPU morph active/uploads/ms %d/%d/%.2f | detail bakeP95/upload ms %.1f/%.1f"),
 			S.FrameP50Ms, S.FrameP95Ms, S.FrameP99Ms, S.Drawn,
 			S.MeshSectionCreates, S.MeshSectionUpdates, S.MeshSectionClears,
 			S.MeshResourceRebuilds,
+			S.BalanceBlocked,
 			S.ActiveCpuMorphPatches, S.CpuMorphUploads, S.CpuMorphUploadMs,
 			S.DetailBakeP95Ms, S.DetailUploadMs));
 }

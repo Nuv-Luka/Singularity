@@ -37,6 +37,7 @@ struct FPlanetTerrainNextFrameStats
 	int32 Splits = 0;
 	int32 Merges = 0;
 	int32 BudgetBlocked = 0;
+	int32 BalanceBlocked = 0;
 	int32 MaxDrawnLevel = 0;
 	/** Drawn patch counts for levels 0..3 (diagnose L0/L1 unload vs holes). */
 	int32 DrawnL0 = 0;

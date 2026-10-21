@@ -9,6 +9,7 @@ Branch: `feature/planet-terrain-next-r11-visual-lod`
 - R11 stage B adds cube-face-aware neighbor lookup and a conservative 2:1 quadtree balance gate. A split is deferred when any sampled neighbor edge is two or more levels coarser; the existing covering patch remains active.
 - `FPlanetTerrainNextQuadtreeStats::BalanceBlocked` records balance deferrals for telemetry.
 - Child patch baking now applies a two-row local edge band: the boundary row is parent-compatible and the adjacent row is half blended, with fine geological detail preserved in the interior.
+- The runtime frame stats and `PlanetTerrainNextPerf.csv` now expose `balance_blocked`; Unreal Insights scopes cover quadtree updates and fade-parameter reconciliation.
 
 ## Validation
 
@@ -18,4 +19,4 @@ Branch: `feature/planet-terrain-next-r11-visual-lod`
 
 ## Remaining acceptance work
 
-The branch still needs the user trajectory capture for orbital view, approach, descent, surface traversal and ascent. Record frame P50/P95/P99, Game/Draw/RHI/GPU timings, visible patches, draw calls, transition counts, mesh updates/creates, and `BalanceBlocked` while checking cube-face seams and reverse split/merge transitions. No performance recovery claim is made from the automation tests alone.
+The final branch still needs the user trajectory capture for orbital view, approach, descent, surface traversal and ascent. Record frame P50/P95/P99, Game/Draw/RHI/GPU timings, visible patches, draw calls, transition counts, mesh updates/creates, and `BalanceBlocked` while checking cube-face seams and reverse split/merge transitions. No performance recovery claim is made from the automation tests alone.

@@ -1,5 +1,6 @@
 #include "PlanetTerrainNextQuadtree.h"
 #include "PlanetTerrainNextCoordinates.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 struct FPlanetTerrainNextQuadtree::FNode
 {
@@ -341,6 +342,7 @@ void FPlanetTerrainNextQuadtree::Update(
 	FReadyFn IsReady,
 	TArray<FPlanetTerrainNextNodeId>& OutReleased)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_QuadtreeUpdate);
 	Stats.Splits = 0;
 	Stats.Merges = 0;
 	Stats.BudgetBlocked = 0;
