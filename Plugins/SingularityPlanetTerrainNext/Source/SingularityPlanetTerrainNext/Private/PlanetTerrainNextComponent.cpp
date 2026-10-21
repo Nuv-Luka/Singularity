@@ -681,6 +681,30 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_MeshSectionUpload);
 	TRACE_CPUPROFILER_EVENT_SCOPE(PlanetTerrainNext_UploadPatch);
+	if (!IsValid(Slot.Mesh))
+	{
+		UE_LOG(LogPlanetTerrainNext, Error, TEXT("UploadPatch skipped: invalid mesh for node %s"), *Patch.Id.ToString());
+		return;
+	}
+	const int32 VertexCount = Patch.VerticesCm.Num();
+	const bool bAttributesMatch = VertexCount > 0
+		&& Patch.Normals.Num() == VertexCount
+		&& Patch.Tangents.Num() == VertexCount
+		&& Patch.UVs.Num() == VertexCount
+		&& Patch.UV1.Num() == VertexCount
+		&& Patch.UV2.Num() == VertexCount
+		&& Patch.VertexColors.Num() == VertexCount
+		&& Patch.CoarseVerticesCm.Num() == VertexCount
+		&& Patch.CoarseNormals.Num() == VertexCount;
+	if (!bAttributesMatch)
+	{
+		UE_LOG(LogPlanetTerrainNext, Error,
+			TEXT("UploadPatch skipped: attribute mismatch node %s V=%d N=%d T=%d UV=%d UV1=%d UV2=%d C=%d Coarse=%d/%d"),
+			*Patch.Id.ToString(), VertexCount, Patch.Normals.Num(), Patch.Tangents.Num(),
+			Patch.UVs.Num(), Patch.UV1.Num(), Patch.UV2.Num(), Patch.VertexColors.Num(),
+			Patch.CoarseVerticesCm.Num(), Patch.CoarseNormals.Num());
+		return;
+	}
 	Slot.Mesh->SetRelativeLocation(Patch.OriginM * PlanetTerrainNext::CmPerMeter);
 
 	Slot.Tangents.Reset();
@@ -715,6 +739,11 @@ void UPlanetTerrainNextComponent::UploadPatch(FSlot& Slot, const FPlanetTerrainN
 		}
 
 		const TArray<int32>& Indices = PlanetTerrainNextPatch::Indices();
+		if (Indices.Num() == 0 || (Indices.Num() % 3) != 0)
+		{
+			UE_LOG(LogPlanetTerrainNext, Error, TEXT("UploadPatch skipped: invalid index buffer for node %s (%d indices)"), *Patch.Id.ToString(), Indices.Num());
+			return;
+		}
 		if (ShouldRecreateSection(Slot, true, Patch.VerticesCm.Num(), Indices.Num()))
 		{
 			ClearSlotSection(Slot);
