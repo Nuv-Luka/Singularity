@@ -47,6 +47,10 @@ struct SINGULARITYPLANETTERRAINNEXT_API FPlanetTerrainNextGeologyEvent
 	double ReliefMeters = 0.0;
 	double RimMeters = 0.0;
 	double InfluenceRadiusMeters = 0.0;
+	/** Approximate post-flood fill elevation for a basin-local lava episode. */
+	double FillHeightMeters = 0.0;
+	/** Width of the anti-aliased shoreline transition in meters. */
+	double ShorelineWidthMeters = 0.0;
 	float CompositionStrength = 0.0f;
 	uint64 LocalSeed = 0;
 };

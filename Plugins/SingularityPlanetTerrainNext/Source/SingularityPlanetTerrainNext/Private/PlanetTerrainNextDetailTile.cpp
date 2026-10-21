@@ -29,8 +29,31 @@ namespace
 FLinearColor AlbedoFromTerrain(
 	double HeightM,
 	double Slope01,
-	const FPlanetTerrainNextHeightComponents& Comp)
+	const FPlanetTerrainNextHeightComponents& Comp,
+	const FPlanetTerrainNextSurfaceSample& Geology)
 {
+	if (Geology.MaterialId != 0 || Geology.MareWeight > 0.0 || Geology.EjectaWeight > 0.0 || Geology.ImpactMeltWeight > 0.0)
+	{
+		// Geological composition is blended in linear space. These are art-directed
+		// lunar starting points: bright anorthositic highlands, dark basaltic mare,
+		// brighter ejecta, and patchy intermediate impact melt.
+		const FLinearColor Highland(0.58f, 0.55f, 0.50f, 1.0f);
+		const FLinearColor Mare(0.20f, 0.21f, 0.22f, 1.0f);
+		const FLinearColor Ejecta(0.70f, 0.67f, 0.61f, 1.0f);
+		const FLinearColor Melt(0.40f, 0.39f, 0.37f, 1.0f);
+		FLinearColor Result = Highland * static_cast<float>(Geology.HighlandWeight)
+			+ Mare * static_cast<float>(Geology.MareWeight)
+			+ Ejecta * static_cast<float>(Geology.EjectaWeight)
+			+ Melt * static_cast<float>(Geology.ImpactMeltWeight);
+
+		const float Slope = static_cast<float>(FMath::Clamp(Slope01, 0.0, 1.0));
+		const float Fresh = static_cast<float>(FMath::Clamp(Geology.Freshness, 0.0, 1.0));
+		Result *= FMath::Lerp(0.94f, 1.06f, Slope);
+		Result = FMath::Lerp(Result, Ejecta, 0.10f * Fresh);
+		Result.A = 1.0f;
+		return Result.GetClamped();
+	}
+
 	// Conservative lunar regolith: elevation + crater bowl darkening + slope brightening.
 	const float Bowl = static_cast<float>(FMath::Clamp(-Comp.Craters / 800.0, 0.0, 1.0));
 	const float Elev = static_cast<float>(FMath::Clamp((HeightM + 2000.0) / 6000.0, 0.0, 1.0));
@@ -205,7 +228,8 @@ void Bake(
 			const FVector3d NEnc = NTangent.GetSafeNormal();
 
 			const double Slope01 = 1.0 - FMath::Clamp(FVector3d::DotProduct(NDetail, Dir), 0.0, 1.0);
-			const FLinearColor Albedo = AlbedoFromTerrain(H, Slope01, Comp);
+			const FPlanetTerrainNextSurfaceSample Geology = HeightField.SampleGeology(Dir, TexelM);
+			const FLinearColor Albedo = AlbedoFromTerrain(H, Slope01, Comp, Geology);
 
 			const int32 Index = J * Res + I;
 			Out.Albedo[Index] = Albedo.ToFColor(true);

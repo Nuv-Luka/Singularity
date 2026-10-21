@@ -46,6 +46,39 @@ FORCEINLINE uint64 DoubleBits(double Value)
 	FMemory::Memcpy(&Bits, &Value, sizeof(Bits));
 	return Bits;
 }
+
+FORCEINLINE FVector3d SeedDirection(uint64 Seed)
+{
+	const double Z = static_cast<double>(Mix64(Seed) >> 11) * (2.0 / 9007199254740992.0) - 1.0;
+	const double Phi = static_cast<double>(Mix64(Seed ^ 0xA5A5A5A5ull) >> 11)
+		* (2.0 * PI / 9007199254740992.0);
+	const double S = FMath::Sqrt(FMath::Max(0.0, 1.0 - Z * Z));
+	return FVector3d(S * FMath::Cos(Phi), S * FMath::Sin(Phi), Z);
+}
+
+FORCEINLINE double EventEnvelope(
+	const FPlanetTerrainNextGeologyEvent& Event,
+	const FVector3d& Direction,
+	double DistanceMeters,
+	double SampleFootprintMeters)
+{
+	const double Feather = FMath::Max(Event.InfluenceRadiusMeters * 0.12, SampleFootprintMeters);
+	const double Base = 1.0 - SmoothStep(
+		(DistanceMeters - Event.InfluenceRadiusMeters + Feather) / (2.0 * Feather));
+	if (Base <= 0.0)
+	{
+		return 0.0;
+	}
+
+	// Low-frequency, direction-derived distortion keeps shorelines irregular while
+	// remaining continuous across cube-face, longitude, and pole boundaries.
+	const FVector3d AxisA = SeedDirection(Event.LocalSeed);
+	const FVector3d AxisB = SeedDirection(Event.LocalSeed ^ 0xD1B54A32D192ED03ull);
+	const double Warp = 1.0
+		+ 0.055 * FMath::Sin(FVector3d::DotProduct(Direction, AxisA) * 11.0 + 1.3)
+		+ 0.025 * FMath::Sin(FVector3d::DotProduct(Direction, AxisB) * 23.0 - 0.7);
+	return Base * FMath::Clamp(Warp, 0.82, 1.18);
+}
 } // namespace
 
 FPlanetTerrainNextGeologySettings FPlanetTerrainNextGeologySettings::FromDescriptor(
@@ -160,8 +193,32 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.ReliefMeters = -FMath::Min(0.008 * Event.RadiusMeters, 4500.0);
 		Event.RimMeters = -Event.ReliefMeters * 0.15;
 		Event.InfluenceRadiusMeters = Event.RadiusMeters * 1.6;
+		Event.FillHeightMeters = Event.ReliefMeters * 0.22;
+		Event.ShorelineWidthMeters = FMath::Max(12000.0, Event.RadiusMeters * 0.08);
 		Event.CompositionStrength = 0.65f;
 		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
+
+		// Separate basin-local basalt episodes approximate reachable flooding. The
+		// flood mask is analytic in this first visual stage; it is intentionally
+		// bounded by the basin cap rather than filling unrelated global lowlands.
+		const int32 EpisodeCount = 2;
+		for (int32 Episode = 0; Episode < EpisodeCount; ++Episode)
+		{
+			FPlanetTerrainNextGeologyEvent& Flow = Events.AddDefaulted_GetRef();
+			Flow.Id = EventId++;
+			Flow.Type = EPlanetTerrainNextGeologyEventType::BasaltEpisode;
+			const FVector3d Offset = SeedDirection(Event.LocalSeed ^ static_cast<uint64>(Episode + 1));
+			Flow.CenterUnit = (Event.CenterUnit * 0.78 + Offset * 0.22).GetSafeNormal();
+			Flow.RadiusMeters = Event.RadiusMeters * FMath::Lerp(0.45, 0.75, Rng.Next01());
+			Flow.AgeMyrBP = FMath::Clamp(Event.AgeMyrBP - FMath::Lerp(40.0, 900.0, Rng.Next01()), Settings.YoungestAgeMyrBP, Settings.OldestAgeMyrBP);
+			Flow.ReliefMeters = 0.0;
+			Flow.RimMeters = 0.0;
+			Flow.InfluenceRadiusMeters = Flow.RadiusMeters * 1.35;
+			Flow.FillHeightMeters = Event.FillHeightMeters + FMath::Lerp(-80.0, 80.0, Rng.Next01());
+			Flow.ShorelineWidthMeters = FMath::Max(8000.0, Flow.RadiusMeters * 0.1);
+			Flow.CompositionStrength = static_cast<float>(FMath::Lerp(0.55, 0.9, Rng.Next01()));
+			Flow.LocalSeed = HashStep(Event.LocalSeed, static_cast<uint64>(Episode + 1));
+		}
 	}
 
 	for (int32 Index = 0; Index < Settings.ImpactCount; ++Index)
@@ -176,6 +233,8 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		Event.ReliefMeters = FMath::Min(Radius * FMath::Lerp(0.03, 0.12, Rng.Next01()), 4000.0);
 		Event.RimMeters = Event.ReliefMeters * 0.3;
 		Event.InfluenceRadiusMeters = Radius * 1.6;
+		Event.FillHeightMeters = 0.0;
+		Event.ShorelineWidthMeters = Radius * 0.1;
 		Event.CompositionStrength = static_cast<float>(FMath::Lerp(0.2, 0.8, Rng.Next01()));
 		Event.LocalSeed = HashStep(static_cast<uint64>(Descriptor.Seed), Event.Id);
 	}
@@ -190,6 +249,8 @@ void FPlanetTerrainNextGeologyModel::GenerateEvents(const FPlanetTerrainNextDesc
 		IdentityHash = HashStep(IdentityHash, Event.Id);
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.RadiusMeters));
 		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.AgeMyrBP));
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.FillHeightMeters));
+		IdentityHash = HashStep(IdentityHash, DoubleBits(Event.ShorelineWidthMeters));
 		IdentityHash = HashStep(IdentityHash, Event.LocalSeed);
 	}
 }
@@ -287,6 +348,10 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 {
 	const FVector3d Direction = UnitDirection.GetSafeNormal();
 	FPlanetTerrainNextSurfaceSample Sample;
+	if (!Settings.bEnableGeologicalBiomes)
+	{
+		return Sample;
+	}
 	TArray<int32, TInlineAllocator<64>> Candidates;
 	GatherCandidateIndices(Direction, Candidates);
 	const double Footprint = FMath::Max(0.0, SampleFootprintMeters);
@@ -294,8 +359,7 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 	{
 		const FPlanetTerrainNextGeologyEvent& Event = Events[EventIndex];
 		const double Distance = PlanetTerrainNextGeology::GreatCircleDistanceMeters(Direction, Event.CenterUnit, RadiusMeters);
-		const double Feather = FMath::Max(Event.InfluenceRadiusMeters * 0.15, Footprint);
-		const double Influence = 1.0 - SmoothStep((Distance - Event.InfluenceRadiusMeters + Feather) / (2.0 * Feather));
+		const double Influence = EventEnvelope(Event, Direction, Distance, Footprint);
 		if (Influence <= 0.0)
 		{
 			continue;
@@ -303,12 +367,29 @@ FPlanetTerrainNextSurfaceSample FPlanetTerrainNextGeologyModel::SampleSurface(
 		const double Fresh = FMath::Exp(-Event.AgeMyrBP / 500.0);
 		Sample.ExposureAgeMyr = FMath::Min(Sample.ExposureAgeMyr, Event.AgeMyrBP);
 		Sample.Freshness = FMath::Max(Sample.Freshness, Fresh * Influence);
-		if (Event.Type == EPlanetTerrainNextGeologyEventType::AncientBasin
-			|| Event.Type == EPlanetTerrainNextGeologyEventType::BasaltEpisode)
+		if (Event.Type == EPlanetTerrainNextGeologyEventType::AncientBasin)
 		{
 			const double Deposit = Influence * Event.CompositionStrength;
 			Sample.MareWeight = Sample.MareWeight * (1.0 - Deposit) + Deposit;
 			Sample.HighlandWeight *= (1.0 - Deposit);
+			const double BasinT = Distance / FMath::Max(Event.RadiusMeters, 1.0);
+			if (BasinT < 1.0)
+			{
+				Sample.HeightOffsetM += Event.ReliefMeters * (1.0 - BasinT * BasinT) * Influence;
+			}
+			else if (BasinT < 1.35)
+			{
+				const double RingT = (BasinT - 1.0) / 0.35;
+				Sample.HeightOffsetM += Event.RimMeters * (1.0 - RingT) * (1.0 - RingT) * Influence;
+			}
+		}
+		else if (Event.Type == EPlanetTerrainNextGeologyEventType::BasaltEpisode)
+		{
+			// Basin-local flood approximation: smooth shoreline and bounded reach.
+			const double Deposit = Influence * Event.CompositionStrength;
+			Sample.MareWeight = Sample.MareWeight * (1.0 - Deposit) + Deposit;
+			Sample.HighlandWeight *= (1.0 - Deposit);
+			Sample.HeightOffsetM = FMath::Lerp(Sample.HeightOffsetM, Event.FillHeightMeters, Deposit * 0.25);
 		}
 		else
 		{

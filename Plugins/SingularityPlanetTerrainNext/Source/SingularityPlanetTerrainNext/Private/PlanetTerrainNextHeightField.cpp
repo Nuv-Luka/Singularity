@@ -188,6 +188,20 @@ FPlanetTerrainNextHeightField::FPlanetTerrainNextHeightField(const FPlanetTerrai
 
 	MinHeightM = -(MacroSum + RoughSum + MaxDepth);
 	MaxHeightM = MacroSum + RoughSum + MaxRim;
+	if (GeologyModel.IsValid() && GeologyModel->GetSettings().bEnableGeologicalBiomes)
+	{
+		// Conservative overlap bound for the opt-in macro geology pass. This is
+		// intentionally separate from the legacy crater bound so culling remains
+		// valid when multiple basin events overlap.
+		double GeologyBound = 0.0;
+		for (const FPlanetTerrainNextGeologyEvent& Event : GeologyModel->GetEvents())
+		{
+			GeologyBound += FMath::Abs(Event.ReliefMeters) + FMath::Abs(Event.RimMeters);
+			GeologyBound += FMath::Abs(Event.FillHeightMeters) * 0.25;
+		}
+		MinHeightM -= GeologyBound;
+		MaxHeightM += GeologyBound;
+	}
 }
 
 double FPlanetTerrainNextHeightField::SumOctaves(const TArray<FOctave>& Octaves, const FVector3d& Direction, double MinResolvedWavelengthM) const
@@ -258,6 +272,14 @@ FPlanetTerrainNextHeightComponents FPlanetTerrainNextHeightField::EvaluateCompon
 		MaxRim = FMath::Max(MaxRim, Rim);
 	}
 	Out.Craters = MinBowl + MaxRim;
+	if (GeologyModel.IsValid() && GeologyModel->GetSettings().bEnableGeologicalBiomes)
+	{
+		// Geological macro relief is sampled from the same immutable spherical
+		// model used by detail materials and collision. Its event envelopes are
+		// already smooth and bounded, so no tile or camera state enters this path.
+		const double Footprint = FMath::Max(MinResolvedWavelengthM, 1000.0);
+		Out.Geology = GeologyModel->SampleSurface(Direction, Footprint).HeightOffsetM;
+	}
 	return Out;
 }
 

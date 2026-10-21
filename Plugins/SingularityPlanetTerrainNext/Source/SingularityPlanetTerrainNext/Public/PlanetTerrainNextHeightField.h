@@ -10,10 +10,11 @@ struct FPlanetTerrainNextHeightComponents
 	double Macro = 0.0;
 	double Craters = 0.0;
 	double Roughness = 0.0;
+	double Geology = 0.0;
 
 	double Total() const
 	{
-		return Macro + Craters + Roughness;
+		return Macro + Craters + Roughness + Geology;
 	}
 };
 
