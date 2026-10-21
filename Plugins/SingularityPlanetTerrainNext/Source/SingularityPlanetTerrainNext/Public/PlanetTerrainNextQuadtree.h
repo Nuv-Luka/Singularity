@@ -176,6 +176,7 @@ private:
 	FNode* FindNode(const FPlanetTerrainNextNodeId& Id) const;
 	FNode* FindLeafForDirection(const FVector3d& Direction) const;
 	bool WouldViolateTwoToOne(const FNode& Node) const;
+	bool WouldViolateTwoToOneAfterMerge(const FNode& Node) const;
 	bool IsVisible(const FNode& Node, const FPlanetTerrainNextView& View, const FPlanetTerrainNextLodSettings& Settings) const;
 	double PixelError(const FNode& Node, const FPlanetTerrainNextView& View) const;
 	double WeightedPixelError(const FNode& Node, const FPlanetTerrainNextView& View, const FPlanetTerrainNextLodSettings& Settings) const;

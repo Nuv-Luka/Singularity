@@ -151,24 +151,62 @@ bool FPlanetTerrainNextQuadtree::WouldViolateTwoToOne(const FNode& Node) const
 		return false;
 	}
 
-	// Sample just outside the midpoint of each edge. FacePoint accepts the
-	// small out-of-face coordinate and DirectionToFaceUV resolves cube-face
-	// orientation, including edges shared by different faces.
-	const double EdgeEpsilon = FMath::Max(Node.Id.Size() * 1.0e-7, 1.0e-10);
-	const double MidU = 0.5 * (Node.Id.U0() + Node.Id.U1());
-	const double MidV = 0.5 * (Node.Id.V0() + Node.Id.V1());
-	const double Samples[4][2] = {
-		{MidU, Node.Id.V0() - EdgeEpsilon},
-		{MidU, Node.Id.V1() + EdgeEpsilon},
-		{Node.Id.U0() - EdgeEpsilon, MidV},
-		{Node.Id.U1() + EdgeEpsilon, MidV},
-	};
-	for (const double (&Sample)[2] : Samples)
+	// A split replaces this L node with L+1 children. A neighboring leaf may
+	// therefore be at most L-1; sampling only the midpoint misses small
+	// neighbors near corners and cube-face boundaries.
+	const double EdgeEpsilon = FMath::Max(Node.Id.Size() * 1.0e-6, 1.0e-9);
+	const double EdgeSamples[] = {0.0625, 0.1875, 0.3125, 0.4375, 0.5625, 0.6875, 0.8125, 0.9375};
+	for (const double T : EdgeSamples)
 	{
-		const FNode* Neighbor = FindLeafForDirection(PlanetTerrainNext::FacePoint(Node.Id.Face, Sample[0], Sample[1]));
-		if (Neighbor && static_cast<int32>(Neighbor->Id.Level) + 1 < static_cast<int32>(Node.Id.Level))
+		const double U = FMath::Lerp(Node.Id.U0(), Node.Id.U1(), T);
+		const double V = FMath::Lerp(Node.Id.V0(), Node.Id.V1(), T);
+		const double Samples[4][2] = {
+			{U, Node.Id.V0() - EdgeEpsilon},
+			{U, Node.Id.V1() + EdgeEpsilon},
+			{Node.Id.U0() - EdgeEpsilon, V},
+			{Node.Id.U1() + EdgeEpsilon, V},
+		};
+		for (const double (&Sample)[2] : Samples)
 		{
-			return true;
+			const FNode* Neighbor = FindLeafForDirection(PlanetTerrainNext::FacePoint(Node.Id.Face, Sample[0], Sample[1]));
+			if (Neighbor && static_cast<int32>(Neighbor->Id.Level) < static_cast<int32>(Node.Id.Level))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool FPlanetTerrainNextQuadtree::WouldViolateTwoToOneAfterMerge(const FNode& Node) const
+{
+	if (Node.Id.Level >= 24)
+	{
+		return false;
+	}
+
+	// Merging removes the children and exposes this node at its current level.
+	// The symmetric condition rejects a merge when any rendered/logical leaf on
+	// an edge is more than one level finer than the exposed parent.
+	const double EdgeEpsilon = FMath::Max(Node.Id.Size() * 1.0e-6, 1.0e-9);
+	const double EdgeSamples[] = {0.0625, 0.1875, 0.3125, 0.4375, 0.5625, 0.6875, 0.8125, 0.9375};
+	for (const double T : EdgeSamples)
+	{
+		const double U = FMath::Lerp(Node.Id.U0(), Node.Id.U1(), T);
+		const double V = FMath::Lerp(Node.Id.V0(), Node.Id.V1(), T);
+		const double Samples[4][2] = {
+			{U, Node.Id.V0() - EdgeEpsilon},
+			{U, Node.Id.V1() + EdgeEpsilon},
+			{Node.Id.U0() - EdgeEpsilon, V},
+			{Node.Id.U1() + EdgeEpsilon, V},
+		};
+		for (const double (&Sample)[2] : Samples)
+		{
+			const FNode* Neighbor = FindLeafForDirection(PlanetTerrainNext::FacePoint(Node.Id.Face, Sample[0], Sample[1]));
+			if (Neighbor && static_cast<int32>(Neighbor->Id.Level) > static_cast<int32>(Node.Id.Level) + 1)
+			{
+				return true;
+			}
 		}
 	}
 	return false;
@@ -305,11 +343,16 @@ void FPlanetTerrainNextQuadtree::MergePass(
 	const bool bKeep = Node.bVisible ? Node.LastPixelError > MergeBelow : bWithinGrace;
 	const bool bTooDeep = Node.Id.Level >= Settings.MaxLevel;
 
-	if ((!bKeep || bTooDeep) && IsReady(Node.Id))
+	const bool bBalanceBlocked = WouldViolateTwoToOneAfterMerge(Node);
+	if ((!bKeep || bTooDeep) && IsReady(Node.Id) && !bBalanceBlocked)
 	{
 		ReleaseChildren(Node, OutReleased);
 		++Stats.Merges;
 		return;
+	}
+	if ((!bKeep || bTooDeep) && bBalanceBlocked)
+	{
+		++Stats.BalanceBlocked;
 	}
 
 	for (TUniquePtr<FNode>& Child : Node.Children)
