@@ -74,8 +74,8 @@ struct FPlanetTerrainNextView
 struct FPlanetTerrainNextLodSettings
 {
 	double TargetPixelError = 4.0;
-	/** Queue/refine at this multiple of the normal distance by lowering the effective SSE threshold. */
-	double QueueDistanceScale = 2.0;
+	/** Queue/refine multiplier at MaxLevel; the multiplier ramps linearly from 1x at L0. */
+	double QueueDistanceScale = 10.0;
 	/** Merge when the projected error falls below Target / MergeHysteresis. */
 	double MergeHysteresis = 1.5;
 	int32 MaxLevel = 17;
@@ -92,6 +92,19 @@ struct FPlanetTerrainNextLodSettings
 	 * Values < 1 coarsen the periphery (saves splits). 1 = disabled (no bias).
 	 */
 	double PeripheralLodScale = 1.0;
+
+	double QueueDistanceScaleForLevel(int32 Level) const
+	{
+		const double Alpha = MaxLevel > 0
+			? FMath::Clamp(static_cast<double>(Level) / static_cast<double>(MaxLevel), 0.0, 1.0)
+			: 0.0;
+		return 1.0 + (FMath::Max(1.0, QueueDistanceScale) - 1.0) * Alpha;
+	}
+
+	double QueueTargetPixelErrorForLevel(int32 Level) const
+	{
+		return TargetPixelError / QueueDistanceScaleForLevel(Level);
+	}
 };
 
 struct FPlanetTerrainNextPendingBuild

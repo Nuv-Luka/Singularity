@@ -2113,14 +2113,15 @@ void UPlanetTerrainNextComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 	const double SchedStart = FPlatformTime::Seconds();
 	TArray<FPlanetTerrainNextTileRequest> Desired;
-	const double QueueTargetPixelError = Settings.Lod.TargetPixelError / FMath::Max(1.0, Settings.Lod.QueueDistanceScale);
 	Planner.Plan(
 		Pending,
 		[this](const FPlanetTerrainNextNodeId& NodeId) { return MakeTileId(NodeId); },
-		QueueTargetPixelError,
+		Settings.Lod.TargetPixelError,
 		FrameCounter,
 		Settings.PrefetchPerFrame,
-		Desired);
+		Desired,
+		Settings.Lod.QueueDistanceScale,
+		Settings.Lod.MaxLevel);
 	for (const FPlanetTerrainNextNodeId& CollisionId : CollisionManager.GetDesired())
 	{
 		if (CollisionResident.Contains(CollisionId))

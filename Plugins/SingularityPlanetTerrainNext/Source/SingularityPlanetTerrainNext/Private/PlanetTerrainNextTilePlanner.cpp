@@ -6,7 +6,9 @@ void FPlanetTerrainNextTilePlanner::Plan(
 	double TargetPixelError,
 	int64 Frame,
 	int32 MaxPrefetch,
-	TArray<FPlanetTerrainNextTileRequest>& OutRequests)
+	TArray<FPlanetTerrainNextTileRequest>& OutRequests,
+	double QueueDistanceScaleMax,
+	int32 QueueMaxLevel)
 {
 	Stats = FPlanetTerrainNextPlannerStats();
 	OutRequests.Reset();
@@ -14,6 +16,7 @@ void FPlanetTerrainNextTilePlanner::Plan(
 
 	TSet<FPlanetTerrainNextTileId> Seen;
 	const double Target = FMath::Max(TargetPixelError, 1.0e-3);
+	const double ScaleMax = FMath::Max(1.0, QueueDistanceScaleMax);
 
 	for (const FPlanetTerrainNextPendingBuild& PendingItem : Pending)
 	{
@@ -27,12 +30,17 @@ void FPlanetTerrainNextTilePlanner::Plan(
 		const bool bVisibleBoost = PendingItem.Priority >= 1.0e12;
 		const double PixelError = bVisibleBoost ? (PendingItem.Priority - 1.0e12) : PendingItem.Priority;
 
+		const double LevelAlpha = QueueMaxLevel > 0
+			? FMath::Clamp(static_cast<double>(PendingItem.Id.Level) / static_cast<double>(QueueMaxLevel), 0.0, 1.0)
+			: 0.0;
+		const double QueueTarget = Target / (1.0 + (ScaleMax - 1.0) * LevelAlpha);
+
 		if (bVisibleBoost && PendingItem.Id.Level == 0)
 		{
 			Request.Class = EPlanetTerrainNextRequestClass::Coverage;
 			Request.bRequiredForCoverage = true;
 		}
-		else if (bVisibleBoost && PixelError > Target)
+		else if (bVisibleBoost && PixelError > QueueTarget)
 		{
 			Request.Class = EPlanetTerrainNextRequestClass::VisibleRefine;
 			Request.bRequiredForCoverage = true; // parent stays drawn until children ready

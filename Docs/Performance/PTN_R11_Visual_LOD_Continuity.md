@@ -11,7 +11,7 @@ Branch: `feature/planet-terrain-next-r11-complete`
 - Child patch baking now applies a two-row local edge band: the boundary row is parent-compatible and the adjacent row is half blended, with fine geological detail preserved in the interior.
 - The runtime frame stats and `PlanetTerrainNextPerf.csv` now expose `balance_blocked`; Unreal Insights scopes cover quadtree updates and fade-parameter reconciliation.
 - The default game-thread patch build budget is 6 ms (`singularity.TerrainNext.BuildBudgetMs`).
-- LOD queue/refinement uses `singularity.TerrainNext.LodQueueDistanceScale`, default 2.0. The effective screen-space error threshold is halved, so the same LOD work is queued at approximately twice the camera distance while `MaxPatches` and the existing balance gate remain in force.
+- LOD queue/refinement uses `singularity.TerrainNext.LodQueueDistanceScale`, default 10.0 at `MaxLevel`. The effective multiplier ramps linearly from 1x at L0 to 10x at L17, so fine LOD work is queued progressively farther ahead while `MaxPatches` and the existing balance gate remain in force.
 
 ## Validation
 

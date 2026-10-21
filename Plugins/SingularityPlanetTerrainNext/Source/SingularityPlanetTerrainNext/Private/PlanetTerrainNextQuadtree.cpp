@@ -299,7 +299,7 @@ void FPlanetTerrainNextQuadtree::MergePass(
 		return;
 	}
 
-	const double QueueTargetPixelError = Settings.TargetPixelError / FMath::Max(1.0, Settings.QueueDistanceScale);
+	const double QueueTargetPixelError = Settings.QueueTargetPixelErrorForLevel(Node.Id.Level);
 	const double MergeBelow = QueueTargetPixelError / FMath::Max(1.0, Settings.MergeHysteresis);
 	const bool bWithinGrace = View.TimeSeconds - Node.LastVisibleTime < Settings.InvisibleGraceSeconds;
 	const bool bKeep = Node.bVisible ? Node.LastPixelError > MergeBelow : bWithinGrace;
@@ -328,7 +328,7 @@ void FPlanetTerrainNextQuadtree::CollectSplitCandidates(FNode& Node, const FPlan
 		}
 		return;
 	}
-	const double QueueTargetPixelError = Settings.TargetPixelError / FMath::Max(1.0, Settings.QueueDistanceScale);
+	const double QueueTargetPixelError = Settings.QueueTargetPixelErrorForLevel(Node.Id.Level);
 	if (Node.bVisible
 		&& Node.Id.Level < Settings.MaxLevel
 		&& Node.LastPixelError > QueueTargetPixelError

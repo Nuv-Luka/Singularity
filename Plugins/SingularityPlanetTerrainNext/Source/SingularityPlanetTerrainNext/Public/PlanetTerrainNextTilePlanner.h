@@ -46,6 +46,8 @@ public:
 	/**
 	 * @param Pending          Nodes the tree wants built (already priority-sorted).
 	 * @param TargetPixelError LOD target — used to split VisibleRefine vs Frustum.
+	 * @param QueueDistanceScaleMax Maximum queue-distance multiplier at QueueMaxLevel; ramps from 1x at L0.
+	 * @param QueueMaxLevel Level at which QueueDistanceScaleMax is reached.
 	 * @param Frame            Current frame (deadlines).
 	 * @param MaxPrefetch      Cap on speculative neighbor requests (0 disables).
 	 */
@@ -55,7 +57,9 @@ public:
 		double TargetPixelError,
 		int64 Frame,
 		int32 MaxPrefetch,
-		TArray<FPlanetTerrainNextTileRequest>& OutRequests);
+		TArray<FPlanetTerrainNextTileRequest>& OutRequests,
+		double QueueDistanceScaleMax = 1.0,
+		int32 QueueMaxLevel = 0);
 
 	const FPlanetTerrainNextPlannerStats& GetStats() const { return Stats; }
 

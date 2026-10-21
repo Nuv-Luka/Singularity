@@ -11,8 +11,8 @@ TAutoConsoleVariable<float> CVarTargetPixelError(
 
 TAutoConsoleVariable<float> CVarLodQueueDistanceScale(
 	TEXT("singularity.TerrainNext.LodQueueDistanceScale"),
-	2.0f,
-	TEXT("Queue and refine LOD patches this many times farther away than the normal target. 2 = twice the distance."));
+	10.0f,
+	TEXT("Maximum LOD queue/refine distance multiplier at MaxLevel. The multiplier ramps from 1x at L0; 10 = L0 x1 through L17 x10."));
 
 TAutoConsoleVariable<int32> CVarMaxLevel(
 	TEXT("singularity.TerrainNext.MaxLevel"),
@@ -244,7 +244,7 @@ FPlanetTerrainNextRuntimeSettings FPlanetTerrainNextRuntimeSettings::Read()
 {
 	FPlanetTerrainNextRuntimeSettings Out;
 	Out.Lod.TargetPixelError = FMath::Max(0.25, static_cast<double>(CVarTargetPixelError.GetValueOnGameThread()));
-	Out.Lod.QueueDistanceScale = FMath::Clamp(static_cast<double>(CVarLodQueueDistanceScale.GetValueOnGameThread()), 1.0, 4.0);
+	Out.Lod.QueueDistanceScale = FMath::Clamp(static_cast<double>(CVarLodQueueDistanceScale.GetValueOnGameThread()), 1.0, 16.0);
 	Out.Lod.MaxLevel = FMath::Clamp(CVarMaxLevel.GetValueOnGameThread(), 0, 24);
 	Out.Lod.MaxNodes = FMath::Clamp(CVarMaxPatches.GetValueOnGameThread(), 6, 16384);
 	Out.Lod.bFreeze = CVarFreezeLod.GetValueOnGameThread();

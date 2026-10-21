@@ -2,6 +2,7 @@
 #include "PlanetTerrainNextHeightField.h"
 #include "PlanetTerrainNextLodFade.h"
 #include "PlanetTerrainNextPatchMesh.h"
+#include "PlanetTerrainNextQuadtree.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -113,6 +114,24 @@ bool FPlanetTerrainNextR11EdgeBandTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("edge band max fine/coarse gap %.6f cm"), MaxEdgeGapCm));
 	TestTrue(TEXT("levelled child edge is parent-compatible"), MaxEdgeGapCm < 0.01);
 	TestEqual(TEXT("edge-band patch has canonical topology"), Patch.VerticesCm.Num(), PlanetTerrainNextPatch::VertexCount);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPlanetTerrainNextR11LodQueueRampTest,
+	"Singularity.PlanetTerrainNext.R11.LodQueueDistanceRamp",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetTerrainNextR11LodQueueRampTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	FPlanetTerrainNextLodSettings Settings;
+	Settings.MaxLevel = 17;
+	Settings.QueueDistanceScale = 10.0;
+	TestTrue(TEXT("L0 queue multiplier is 1x"), FMath::IsNearlyEqual(Settings.QueueDistanceScaleForLevel(0), 1.0));
+	TestTrue(TEXT("L17 queue multiplier is 10x"), FMath::IsNearlyEqual(Settings.QueueDistanceScaleForLevel(17), 10.0));
+	TestTrue(TEXT("L8 queue multiplier ramps between endpoints"), FMath::IsNearlyEqual(Settings.QueueDistanceScaleForLevel(8), 1.0 + 9.0 * 8.0 / 17.0));
+	TestTrue(TEXT("L17 queue threshold is one tenth of base"), FMath::IsNearlyEqual(Settings.QueueTargetPixelErrorForLevel(17), Settings.TargetPixelError / 10.0));
 	return true;
 }
 
